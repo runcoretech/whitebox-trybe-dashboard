@@ -48,4 +48,4 @@ Open [http://localhost:5174](http://localhost:5174) in your browser.
 *   **Role Protection Gate**: The dashboard checks `localStorage.getItem('whitebox_role')` on load.
 *   **Redirect Logic**: If no user role is saved (user is not logged in), the browser is automatically redirected back to the marketing site's login page:
     *   If running on `localhost`, it redirects to `http://localhost:5173/login.html`.
-    *   If running in production (`dashboard.whiteboxworks.com`), it redirects to `https://whiteboxworks.com/login.html`.
+    *   If running in production (`app.whiteboxworks.com`), it redirects to `https://whiteboxworks.com/login.html`.
