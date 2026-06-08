@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+.vscode/
+.idea/
+.DS_Store
+*.local
+*.log
+
+# Env & Secrets
+.env
+.env.*
+*.pem
+*.key
