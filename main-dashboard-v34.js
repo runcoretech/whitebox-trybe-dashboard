@@ -1,4 +1,185 @@
 import './spend-ledger-modal.js';
+import { supabase } from './supabaseClient.js';
+
+const userEmails = {
+  'Paul K.': 'owner@whitebox.com',
+  'Gregory Sterling': 'g.sterling@whitebox.com',
+  'Sarah Lansky': 'executive@whitebox.com',
+  'Emily Davis': 'e.davis@whitebox.com',
+  'Marcus Dupond': 'manager@whitebox.com',
+  'Jane Smith': 'j.smith@whitebox.com',
+  'Tom Collins': 'rep@whitebox.com',
+  'Dwight Schrute': 'd.schrute@whitebox.com',
+  'John Doe': 'j.doe@whitebox.com',
+  'Alice Cooper': 'a.cooper@whitebox.com',
+  'Bob Martin': 'b.martin@whitebox.com',
+  'Charlie Brown': 'c.brown@whitebox.com',
+  'Eve Tenant': 'eve.tenant@whitebox.com'
+};
+
+async function syncSupabaseSession(username, role) {
+  let targetUser = username;
+  if (role === 'revoked') {
+    targetUser = 'Charlie Brown';
+  } else if (role === 'owner') {
+    targetUser = 'Paul K.';
+  } else if (role === 'manager' && (!username || username === 'Paul K.')) {
+    targetUser = 'Marcus Dupond';
+  } else if (role === 'rep' && (!username || username === 'Paul K.')) {
+    targetUser = 'Tom Collins';
+  }
+
+  const email = userEmails[targetUser] || 'owner@whitebox.com';
+  console.log(`[SUPABASE AUTH] Syncing session for username "${targetUser}", email: "${email}", role: "${role}"`);
+  
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: email,
+      password: 'wb_password_2026!'
+    });
+    
+    if (error) {
+      console.error("[SUPABASE AUTH] Error signing in:", error.message);
+    } else {
+      console.log("[SUPABASE AUTH] Sign in successful. User ID:", data.user.id);
+    }
+  } catch (err) {
+    console.error("[SUPABASE AUTH] Exception during sign in:", err);
+  }
+}
+
+async function fetchDashboardData() {
+  console.log("[SUPABASE DATA] Fetching all dashboard data from Supabase...");
+  try {
+    // 1. Fetch profiles to populate employeesData
+    const { data: profiles, error: pError } = await supabase.from('profiles').select('*');
+    if (pError) throw pError;
+    
+    // Fetch leaderboard live stats to enrich profiles
+    const { data: leaderboard, error: lError } = await supabase.from('leaderboard_live').select('*');
+    if (lError) throw lError;
+
+    // Fetch contacts decay status
+    const { data: decayStatus, error: dError } = await supabase.from('contacts_decay_status').select('*');
+    if (dError) throw dError;
+
+    // 2. Fetch contacts joined with organizations
+    const { data: contacts, error: cError } = await supabase.from('contacts').select(`
+      *,
+      organizations:org_id (*)
+    `);
+    if (cError) throw cError;
+
+    // Fetch gifts count per contact
+    const { data: gifts, error: gError } = await supabase.from('gifts').select('id, contact_id, status, amount');
+    if (gError) throw gError;
+
+    // Parse and map profiles (employeesData)
+    employeesData = profiles.map(p => {
+      const leader = leaderboard.find(l => l.id === p.id) || {};
+      const initials = p.name.split(' ').map(n => n[0]).join('').toUpperCase();
+      let roleType = 'reps';
+      let roleLabel = 'Senior Sales Representative';
+      if (p.role === 'owner') {
+        roleType = 'executives';
+        roleLabel = 'Managing Partner & CEO';
+      } else if (p.role === 'executive') {
+        roleType = 'executives';
+        roleLabel = 'Chief People Officer';
+      } else if (p.role === 'manager') {
+        roleType = 'managers';
+        roleLabel = 'Sales Manager';
+      }
+      
+      const managerName = profiles.find(m => m.id === p.manager_id)?.name || (p.role === 'owner' ? 'Board / Shareholders' : 'Gregory Sterling');
+
+      return {
+        name: p.name,
+        initials: initials,
+        role: roleLabel,
+        roleType: roleType,
+        manager: managerName,
+        prospects: parseInt(leader.prospects) || 0,
+        customers: parseInt(leader.clients) || 0,
+        gifts: parseInt(leader.gifts_sent) || 0,
+        giftsReceived: p.role === 'owner' ? 12 : 8,
+        inactiveDays: p.role === 'owner' ? 5 : 8,
+        date: "May 20, 2026",
+        health: parseInt(leader.avg_health) || 95,
+        colorClass: p.role === 'rep' ? 'bg-teal' : (p.role === 'manager' ? 'bg-purple' : 'bg-blue'),
+        sector: p.role === 'owner' ? 'Owner Workspace' : 'New Territory',
+        streetAddress: "120 Bay St",
+        contact: p.name,
+        city: "Miami",
+        province: "FL",
+        postal: "33131",
+        prospect: "N/A",
+        customer: "N/A",
+        phone: p.email.includes('owner') ? '(800) 555-0101' : '(416) 555-0112',
+        email: p.email,
+        aiRecommend: p.role === 'owner' ? "Keep high engagement with strategic partners." : "Onboarded fresh today.",
+        isWorking: p.status === 'active',
+        activeTask: p.status === 'active' ? "Reviewing Relationship OS Workspace onboarding guides" : "",
+        activeSince: p.status === 'active' ? "09:00 AM" : "",
+        sessionDuration: "00:05:00",
+        todayTouches: "0 touches logged"
+      };
+    });
+
+    // Parse and map contacts (customersData and prospectsData)
+    const allContactsMapped = contacts.map(c => {
+      const org = c.organizations || {};
+      const repProfile = profiles.find(p => p.id === c.assigned_rep_id) || {};
+      const decay = decayStatus.find(d => d.contact_id === c.id) || {};
+      const contactGifts = gifts.filter(g => g.contact_id === c.id);
+      const initials = org.name ? org.name.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase() : 'CO';
+
+      // Category maps to hot/warm/cold for prospects, or org category for customers
+      let category = org.category;
+      if (org.category === 'prospect') {
+        const computedHealth = parseInt(decay.computed_health) || 75;
+        if (computedHealth >= 80) category = 'hot';
+        else if (computedHealth >= 50) category = 'warm';
+        else category = 'cold';
+      }
+
+      return {
+        id: c.id,
+        name: org.name || 'Unknown Org',
+        initials: initials,
+        sector: org.sector || 'N/A',
+        rep: repProfile.name || 'Unassigned',
+        prospects: org.category === 'prospect' ? 1 : 0,
+        customers: org.category !== 'prospect' ? 1 : 0,
+        gifts: contactGifts.length,
+        inactiveDays: Math.round(decay.inactive_days) || 0,
+        health: parseInt(decay.computed_health) || parseInt(c.relationship_health) || 100,
+        colorClass: org.category === 'prospect' ? 'bg-amber' : 'bg-blue',
+        streetAddress: org.street_address || '120 Broadway',
+        contact: c.name,
+        city: org.city || 'New York',
+        province: org.province || 'NY',
+        postal: org.postal_code || '10005',
+        prospect: org.category === 'prospect' ? "2026-02-14" : "N/A",
+        customer: org.category !== 'prospect' ? "2026-03-20" : "N/A",
+        phone: c.phone || org.phone || '(212) 555-0155',
+        email: c.email || org.email || 'contact@apex.com',
+        aiRecommend: c.ai_recommendation || 'No recommendation logged.',
+        category: category,
+        dealValue: org.category === 'prospect' ? 75000 : undefined
+      };
+    });
+
+    // Separate customers and prospects
+    customersData = allContactsMapped.filter(c => c.category !== 'hot' && c.category !== 'warm' && c.category !== 'cold' && c.category !== 'prospect');
+    prospectsData = allContactsMapped.filter(c => c.category === 'hot' || c.category === 'warm' || c.category === 'cold' || c.category === 'prospect');
+
+    window.employeesData = employeesData;
+    console.log(`[SUPABASE DATA] Successfully loaded ${employeesData.length} profiles, ${customersData.length} customers, ${prospectsData.length} prospects.`);
+  } catch (err) {
+    console.error("[SUPABASE DATA] Error fetching dashboard data:", err);
+  }
+}
 
 window.onerror = function(message, source, lineno, colno, error) {
   const div = document.createElement('div');
@@ -118985,7 +119166,7 @@ const calendarEventsDB = {
 
 
 
-const employeesData = [
+let employeesData = [
 
 
 
@@ -144576,7 +144757,7 @@ window.sendRelationshipToRecoveryBoard = function(client) {
 
 
 
-const customersData = [
+let customersData = [
 
 
 
@@ -147595,7 +147776,7 @@ function initCustomersDirectory() {
 
 
 
-const prospectsData = [
+let prospectsData = [
 
 
 
