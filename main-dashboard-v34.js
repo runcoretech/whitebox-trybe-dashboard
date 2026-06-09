@@ -56645,7 +56645,10 @@ function getClientHistory(name) {
         date: dateText,
         grade: act.grade || 'C',
         notes: act.notes || '',
-        rep: act.profiles ? act.profiles.name : (act.rep_id === '8b1933c0-0f0e-4361-b472-3c8cfa2b9801' ? 'Paul K.' : 'System Automation'),
+        rep: act.profiles ? act.profiles.name : (() => {
+          const matchedProfile = (window.supabaseProfiles || []).find(p => p.id === act.rep_id);
+          return matchedProfile ? matchedProfile.name : 'System Automation';
+        })(),
         logged_at: act.logged_at,
         contact_id: act.contact_id,
         sector: sector,
@@ -56868,200 +56871,15 @@ function renderTimeline(clientName) {
 
 
   const type = window.activeProfileType || 'customer';
-  if (type === 'employee' && window.employeeTimelineTab === 'report') {
-    // Render the report card!
-    const myClients = (typeof customersData !== 'undefined' ? customersData : []).filter(c => c.rep === clientName);
-    const myProspects = (typeof prospectsData !== 'undefined' ? prospectsData : []).filter(p => p.rep === clientName);
-    const totalManaged = myClients.length + myProspects.length;
+  let history = getClientHistory(clientName);
 
-    // Filter activities logged by this employee
-    const profile = (window.supabaseProfiles || []).find(p => p.name === clientName);
-    let myActivities = [];
-    if (profile && window.supabaseActivities) {
-      myActivities = window.supabaseActivities.filter(act => act.rep_id === profile.id);
-    }
-    const totalLogged = myActivities.length;
-
-    // Calculate Client Health Grade Profile from my activities
-    let gradeCounts = { A: 0, B: 0, C: 0, D: 0, F: 0 };
-    myActivities.forEach(act => {
-      const g = (act.grade || 'C').toUpperCase();
-      if (gradeCounts.hasOwnProperty(g)) {
-        gradeCounts[g]++;
-      } else {
-        gradeCounts['C']++;
-      }
-    });
-
-    // Calculate inactive clients/prospects (> 30 days) and urgent alerts (> 60 days or health < 60%)
-    let inactiveCount = 0;
-    let activeCount = 0;
-    let urgentAlerts = [];
-
-    // Let's loop through managed contacts
-    const allManaged = [...myClients.map(c => ({...c, type: 'customer'})), ...myProspects.map(p => ({...p, type: 'prospect'}))];
-    allManaged.forEach(contact => {
-      // Find activities for this contact
-      let contactActivities = [];
-      if (window.supabaseActivities) {
-        contactActivities = window.supabaseActivities.filter(act => act.contact_id === contact.id);
-      }
-      let days = contact.inactiveDays || 0;
-      if (contactActivities.length > 0) {
-        let mostRecent = null;
-        contactActivities.forEach(act => {
-          const actDate = new Date(act.logged_at);
-          if (!mostRecent || actDate > mostRecent) {
-            mostRecent = actDate;
-          }
-        });
-        if (mostRecent) {
-          days = Math.floor(Math.abs(new Date() - mostRecent) / (1000 * 60 * 60 * 24));
-        }
-      }
-
-      if (days > 30) {
-        inactiveCount++;
-      } else {
-        activeCount++;
-      }
-
-      const healthVal = parseInt(contact.health) || 84;
-      if (days > 60 || healthVal < 60) {
-        urgentAlerts.push({
-          name: contact.name,
-          type: contact.type,
-          inactiveDays: days,
-          health: healthVal,
-          rep: contact.rep
-        });
-      }
-    });
-
-    // Recent Gifts Sent (last 30 days)
-    let recentGiftsCount = 0;
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    myActivities.forEach(act => {
-      if ((act.type.includes('Gift') || act.type.includes('🎁')) && new Date(act.logged_at) >= thirtyDaysAgo) {
-        recentGiftsCount++;
-      }
-    });
-
-    // Touchpoint Velocity (touchpoints per client per month)
-    const velocity = totalManaged > 0 ? (totalLogged / totalManaged).toFixed(1) : '0.0';
-
-    // Let's construct a premium Report Card HTML interface
-    let reportHtml = `
-      <div class="report-card-container" style="padding: 16px; font-family: 'Outfit', sans-serif; display: flex; flex-direction: column; gap: 20px;">
-        
-        <!-- Metric Cards Grid -->
-        <div class="report-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px;">
-          
-          <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
-            <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Managed Accounts</span>
-            <span style="font-size: 22px; font-weight: 700; color: #f8fafc; font-family: 'Outfit';">${totalManaged}</span>
-            <span style="font-size: 10px; color: #94a3b8;">${myClients.length} Clients, ${myProspects.length} Prospects</span>
-          </div>
-
-          <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
-            <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Active Status</span>
-            <span style="font-size: 22px; font-weight: 700; color: #10b981; font-family: 'Outfit';">${activeCount} <span style="font-size: 14px; font-weight: 500; color: #64748b;">/ ${totalManaged}</span></span>
-            <span style="font-size: 10px; color: #94a3b8;">${inactiveCount} inactive (>30d)</span>
-          </div>
-
-          <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
-            <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Touchpoint Velocity</span>
-            <span style="font-size: 22px; font-weight: 700; color: #3b82f6; font-family: 'Outfit';">${velocity}</span>
-            <span style="font-size: 10px; color: #94a3b8;">Avg touches per account</span>
-          </div>
-
-          <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
-            <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Recent Gifts (30d)</span>
-            <span style="font-size: 22px; font-weight: 700; color: #a855f7; font-family: 'Outfit';">${recentGiftsCount}</span>
-            <span style="font-size: 10px; color: #94a3b8;">Total campaign rewards</span>
-          </div>
-
-        </div>
-
-        <!-- Grade Distribution Chart -->
-        <div style="background: rgba(255, 255, 255, 0.01); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 12px; padding: 16px;">
-          <h5 style="margin: 0 0 12px 0; font-size: 13px; color: #f8fafc; font-weight: 600; display: flex; align-items: center; gap: 6px;">
-            📊 Client Health Grade Profile
-          </h5>
-          <div style="display: flex; flex-direction: column; gap: 10px;">
-    `;
-
-    // Render bar chart for grade counts
-    const maxGradeCount = Math.max(...Object.values(gradeCounts), 1);
-    Object.entries(gradeCounts).forEach(([grade, count]) => {
-      const pct = (count / (totalLogged || 1)) * 100;
-      let barColor = '#3b82f6';
-      if (grade === 'A') barColor = '#10b981';
-      else if (grade === 'B') barColor = '#34d399';
-      else if (grade === 'C') barColor = '#f59e0b';
-      else if (grade === 'D') barColor = '#f97316';
-      else if (grade === 'F') barColor = '#ef4444';
-
-      reportHtml += `
-            <div style="display: flex; align-items: center; gap: 12px;">
-              <span style="font-size: 12px; font-weight: 700; color: #94a3b8; width: 12px;">${grade}</span>
-              <div style="flex: 1; height: 8px; background: rgba(255, 255, 255, 0.03); border-radius: 4px; overflow: hidden; position: relative;">
-                <div style="width: ${pct}%; height: 100%; background: ${barColor}; border-radius: 4px; transition: width 0.5s ease;"></div>
-              </div>
-              <span style="font-size: 11px; font-weight: 600; color: #cbd5e1; width: 30px; text-align: right;">${count} (${Math.round(pct)}%)</span>
-            </div>
-      `;
-    });
-
-    reportHtml += `
-          </div>
-        </div>
-
-        <!-- Urgent Alerts List -->
-        <div style="background: rgba(255, 255, 255, 0.01); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 12px; padding: 16px;">
-          <h5 style="margin: 0 0 12px 0; font-size: 13px; color: #f8fafc; font-weight: 600; display: flex; align-items: center; gap: 6px;">
-            ⚠️ Urgent Action Required
-            <span style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; font-size: 9px; padding: 2px 6px; border-radius: 9999px;">${urgentAlerts.length} Alerts</span>
-          </h5>
-          
-          <div style="display: flex; flex-direction: column; gap: 8px; max-height: 180px; overflow-y: auto; padding-right: 4px;">
-    `;
-
-    if (urgentAlerts.length === 0) {
-      reportHtml += `
-            <div style="text-align: center; padding: 20px; color: #64748b; font-size: 12px;">
-              ✨ All accounts are healthy and up to date!
-            </div>
-      `;
+  if (type === 'employee') {
+    if (window.employeeTimelineTab === 'report') {
+      history = history.filter(item => item.type === 'Performance Report');
     } else {
-      urgentAlerts.forEach(alert => {
-        reportHtml += `
-            <div style="display: flex; align-items: center; justify-content: space-between; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 10px 12px; border-radius: 8px; gap: 8px;">
-              <div style="display: flex; flex-direction: column; gap: 2px;">
-                <span style="font-size: 12px; font-weight: 700; color: #f1f5f9;">${alert.name}</span>
-                <span style="font-size: 10px; color: #94a3b8; text-transform: capitalize;">${alert.type} • Inactivity: <span style="color: #ef4444; font-weight: 600;">${alert.inactiveDays} days</span></span>
-              </div>
-              <button onclick="if(typeof window.switchToProfile === 'function') { window.switchToProfile('${alert.name}', '${alert.type}') }" style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); color: #3b82f6; font-size: 10px; font-family: 'Outfit'; font-weight: 600; padding: 4px 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(59,130,246,0.2)'" onmouseout="this.style.background='rgba(59,130,246,0.1)'">
-                ⚡ View Contact
-              </button>
-            </div>
-        `;
-      });
+      history = history.filter(item => item.type !== 'Performance Report');
     }
-
-    reportHtml += `
-          </div>
-        </div>
-
-      </div>
-    `;
-
-    detailTimelineList.innerHTML = reportHtml;
-    return;
   }
-
-  const history = getClientHistory(clientName);
 
 
 
@@ -105309,6 +105127,7 @@ function initRelationshipDetailView() {
       else if (activityVal === 'email') dbType = 'Email';
       else if (activityVal === 'proposal') dbType = 'Proposal';
       else if (activityVal === 'gift') dbType = 'Gift';
+      else if (activityVal === 'performance_report') dbType = 'Performance Report';
 
       if (!window.activeContactId && window.activeProfileType !== 'employee') {
         showDashboardToast('No active contact ID found to log activity.', '❌');

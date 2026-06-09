@@ -650,11 +650,10 @@
         if (profileType === 'employee') {
           if (sectorFilterWrap) sectorFilterWrap.style.display = 'flex';
           sectorSel.innerHTML = `
-            <option value="all">📋 All Touchpoints (Activity Card)</option>
-            <option value="customers">👥 Customer Notes Only</option>
-            <option value="prospects">🎯 Prospect Notes Only</option>
-            <option value="employees">👤 Employee Notes Only (Internal)</option>
-            <option value="report">📊 Performance Report Card</option>
+            <option value="all">📋 All Touchpoints</option>
+            <option value="customers">👥 Customer Notes</option>
+            <option value="prospects">🎯 Prospect Notes</option>
+            <option value="performance">📊 Performance Reports</option>
           `;
         } else {
           if (sectorFilterWrap) sectorFilterWrap.style.display = 'none';
@@ -693,234 +692,6 @@
         var tv = typeSel ? typeSel.value.toLowerCase().trim() : 'all';
         var gv = gradeSel ? gradeSel.value.toLowerCase().trim() : 'all';
 
-        if (secv === 'report') {
-          // Hide table header
-          if (thead) thead.style.display = 'none';
-          
-          // Generate Report Card HTML
-          const myClients = (typeof customersData !== 'undefined' ? customersData : []).filter(c => c.rep === empName);
-          const myProspects = (typeof prospectsData !== 'undefined' ? prospectsData : []).filter(p => p.rep === empName);
-          const totalManaged = myClients.length + myProspects.length;
-
-          // Filter activities logged by this employee
-          const profile = (window.supabaseProfiles || []).find(p => p.name === empName);
-          let myActivities = [];
-          if (profile && window.supabaseActivities) {
-            myActivities = window.supabaseActivities.filter(act => act.rep_id === profile.id);
-          }
-          const totalLogged = myActivities.length;
-
-          // Calculate Client Health Grade Profile from my activities
-          let gradeCounts = { A: 0, B: 0, C: 0, D: 0, F: 0 };
-          myActivities.forEach(act => {
-            const g = (act.grade || 'C').toUpperCase();
-            if (gradeCounts.hasOwnProperty(g)) {
-              gradeCounts[g]++;
-            } else {
-              gradeCounts['C']++;
-            }
-          });
-
-          // Calculate inactive clients/prospects (> 30 days) and urgent alerts (> 60 days or health < 60%)
-          let inactiveCount = 0;
-          let activeCount = 0;
-          let urgentAlerts = [];
-
-          const allManaged = [...myClients.map(c => ({...c, type: 'customer'})), ...myProspects.map(p => ({...p, type: 'prospect'}))];
-          allManaged.forEach(contact => {
-            let contactActivities = [];
-            if (window.supabaseActivities) {
-              contactActivities = window.supabaseActivities.filter(act => act.contact_id === contact.id);
-            }
-            let days = contact.inactiveDays || 0;
-            if (contactActivities.length > 0) {
-              let mostRecent = null;
-              contactActivities.forEach(act => {
-                const actDate = new Date(act.logged_at);
-                if (!mostRecent || actDate > mostRecent) {
-                  mostRecent = actDate;
-                }
-              });
-              if (mostRecent) {
-                days = Math.floor(Math.abs(new Date() - mostRecent) / (1000 * 60 * 60 * 24));
-              }
-            }
-
-            if (days > 30) {
-              inactiveCount++;
-            } else {
-              activeCount++;
-            }
-
-            const healthVal = parseInt(contact.health) || 84;
-            if (days > 60 || healthVal < 60) {
-              urgentAlerts.push({
-                name: contact.name,
-                type: contact.type,
-                inactiveDays: days,
-                health: healthVal,
-                rep: contact.rep
-              });
-            }
-          });
-
-          // Recent Gifts Sent (last 30 days)
-          let recentGiftsCount = 0;
-          const thirtyDaysAgo = new Date();
-          thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-          myActivities.forEach(act => {
-            if ((act.type.includes('Gift') || act.type.includes('🎁')) && new Date(act.logged_at) >= thirtyDaysAgo) {
-              recentGiftsCount++;
-            }
-          });
-
-          // Touchpoint Velocity (touchpoints per client per month)
-          const velocity = totalManaged > 0 ? (totalLogged / totalManaged).toFixed(1) : '0.0';
-
-          let reportHtml = `
-            <div class="report-card-container" style="padding: 16px; font-family: 'Outfit', sans-serif; display: flex; flex-direction: column; gap: 20px;">
-              <!-- Metric Cards Grid -->
-              <div class="report-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;">
-                <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
-                  <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Managed Accounts</span>
-                  <span style="font-size: 22px; font-weight: 700; color: #f8fafc; font-family: 'Outfit';">${totalManaged}</span>
-                  <span style="font-size: 10px; color: #94a3b8;">${myClients.length} Clients, ${myProspects.length} Prospects</span>
-                </div>
-
-                <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
-                  <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Active Status</span>
-                  <span style="font-size: 22px; font-weight: 700; color: #10b981; font-family: 'Outfit';">${activeCount} <span style="font-size: 14px; font-weight: 500; color: #64748b;">/ ${totalManaged}</span></span>
-                  <span style="font-size: 10px; color: #94a3b8;">${inactiveCount} inactive (>30d)</span>
-                </div>
-
-                <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
-                  <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Touchpoint Velocity</span>
-                  <span style="font-size: 22px; font-weight: 700; color: #3b82f6; font-family: 'Outfit';">${velocity}</span>
-                  <span style="font-size: 10px; color: #94a3b8;">Avg touches per account</span>
-                </div>
-
-                <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
-                  <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Recent Gifts (30d)</span>
-                  <span style="font-size: 22px; font-weight: 700; color: #a855f7; font-family: 'Outfit';">${recentGiftsCount}</span>
-                  <span style="font-size: 10px; color: #94a3b8;">Total campaign rewards</span>
-                </div>
-              </div>
-
-              <div style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; margin-top: 10px;">
-                <!-- Grade Distribution Chart -->
-                <div style="background: rgba(255, 255, 255, 0.01); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 12px; padding: 16px;">
-                  <h5 style="margin: 0 0 12px 0; font-size: 13px; color: #f8fafc; font-weight: 600; display: flex; align-items: center; gap: 6px;">
-                    📊 Client Health Grade Profile
-                  </h5>
-                  <div style="display: flex; flex-direction: column; gap: 10px;">
-          `;
-
-          Object.entries(gradeCounts).forEach(([grade, count]) => {
-            const pct = (count / (totalLogged || 1)) * 100;
-            let barColor = '#3b82f6';
-            if (grade === 'A') barColor = '#10b981';
-            else if (grade === 'B') barColor = '#34d399';
-            else if (grade === 'C') barColor = '#f59e0b';
-            else if (grade === 'D') barColor = '#f97316';
-            else if (grade === 'F') barColor = '#ef4444';
-
-            reportHtml += `
-                    <div style="display: flex; align-items: center; gap: 12px;">
-                      <span style="font-size: 12px; font-weight: 700; color: #94a3b8; width: 12px;">${grade}</span>
-                      <div style="flex: 1; height: 8px; background: rgba(255, 255, 255, 0.03); border-radius: 4px; overflow: hidden; position: relative;">
-                        <div style="width: ${pct}%; height: 100%; background: ${barColor}; border-radius: 4px;"></div>
-                      </div>
-                      <span style="font-size: 11px; font-weight: 600; color: #cbd5e1; width: 30px; text-align: right;">${count}</span>
-                    </div>
-            `;
-          });
-
-          reportHtml += `
-                  </div>
-                </div>
-
-                <!-- Urgent Alerts List -->
-                <div style="background: rgba(255, 255, 255, 0.01); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 12px; padding: 16px;">
-                  <h5 style="margin: 0 0 12px 0; font-size: 13px; color: #f8fafc; font-weight: 600; display: flex; align-items: center; gap: 6px;">
-                    ⚠️ Urgent Action Required
-                    <span style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; font-size: 9px; padding: 2px 6px; border-radius: 9999px;">${urgentAlerts.length} Alerts</span>
-                  </h5>
-                  <div style="display: flex; flex-direction: column; gap: 8px; max-height: 120px; overflow-y: auto; padding-right: 4px;">
-          `;
-
-          if (urgentAlerts.length === 0) {
-            reportHtml += `
-                    <div style="text-align: center; padding: 20px; color: #64748b; font-size: 12px;">
-                      ✨ All accounts healthy!
-                    </div>
-            `;
-          } else {
-            urgentAlerts.forEach(alert => {
-              reportHtml += `
-                    <div style="display: flex; align-items: center; justify-content: space-between; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 8px 10px; border-radius: 8px; gap: 8px;">
-                      <div style="display: flex; flex-direction: column; gap: 1px;">
-                        <span style="font-size: 11.5px; font-weight: 700; color: #f1f5f9;">${alert.name}</span>
-                        <span style="font-size: 9.5px; color: #94a3b8; text-transform: capitalize;">${alert.type} • Inactivity: <span style="color: #ef4444; font-weight: 600;">${alert.inactiveDays}d</span></span>
-                      </div>
-                      <button onclick="document.getElementById('btn-touchpoint-trend-close').click(); if(typeof window.switchToProfile === 'function') { window.switchToProfile('${alert.name}', '${alert.type}') }" style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); color: #3b82f6; font-size: 9.5px; font-family: 'Outfit'; font-weight: 600; padding: 3px 8px; border-radius: 6px; cursor: pointer;">
-                        View
-                      </button>
-                    </div>
-              `;
-            });
-          }
-
-          reportHtml += `
-                  </div>
-                </div>
-              </div>
-            </div>
-          `;
-
-          if (tbody) {
-            tbody.innerHTML = `<tr style="background: transparent !important;"><td colspan="4" style="padding: 0; border: none;">${reportHtml}</td></tr>`;
-          }
-
-          // Update summary widgets
-          var statTotal = document.getElementById('touchpoint-stat-total');
-          var statAvgGrade = document.getElementById('touchpoint-stat-avg-grade');
-          var statSuccess = document.getElementById('touchpoint-stat-success-rate');
-          if (statTotal) statTotal.textContent = totalLogged;
-          if (statAvgGrade) {
-            let totalPoints = 0, sumPoints = 0;
-            myActivities.forEach(act => {
-              const g = act.grade.toUpperCase();
-              let pts = -1;
-              if (g === 'A') pts = 4;
-              else if (g === 'B') pts = 3;
-              else if (g === 'C') pts = 2;
-              else if (g === 'D') pts = 1;
-              else if (g === 'F') pts = 0;
-              if (pts !== -1) { totalPoints++; sumPoints += pts; }
-            });
-            if (totalPoints > 0) {
-              const avg = sumPoints / totalPoints;
-              let letter = 'C';
-              if (avg >= 3.5) letter = 'A';
-              else if (avg >= 2.5) letter = 'B';
-              else if (avg >= 1.5) letter = 'C';
-              else letter = 'F';
-              statAvgGrade.textContent = `${letter} (${avg.toFixed(1)})`;
-              statAvgGrade.style.color = letter === 'A' ? '#34d399' : (letter === 'F' ? '#f87171' : '#fbbf24');
-            } else {
-              statAvgGrade.textContent = '-';
-            }
-          }
-          if (statSuccess) {
-            const aCount = myActivities.filter(a => a.grade.toUpperCase() === 'A').length;
-            statSuccess.textContent = totalLogged > 0 ? `${Math.round((aCount / totalLogged) * 100)}%` : '0%';
-          }
-          var label = document.getElementById('touchpoint-trend-count-label');
-          if (label) label.textContent = 'Showing Performance Report Card';
-
-          return;
-        }
-
         // Show table header
         if (thead) thead.style.display = '';
 
@@ -934,7 +705,18 @@
           var item = allTouchpoints[i];
           
           var ms = !sv || item.notes.toLowerCase().indexOf(sv) !== -1 || item.date.toLowerCase().indexOf(sv) !== -1 || (item.rep && item.rep.toLowerCase().indexOf(sv) !== -1);
-          var msec = secv === 'all' || item.sector.toLowerCase() === secv;
+          
+          var msec = false;
+          if (secv === 'all') {
+            msec = true;
+          } else if (secv === 'customers') {
+            msec = item.sector.toLowerCase() === 'customers' && item.type !== 'Performance Report';
+          } else if (secv === 'prospects') {
+            msec = item.sector.toLowerCase() === 'prospects' && item.type !== 'Performance Report';
+          } else if (secv === 'performance') {
+            msec = item.type === 'Performance Report';
+          }
+
           var mt = tv === 'all' || item.type.toLowerCase() === tv;
           var mg = gv === 'all' || item.grade.toLowerCase() === gv;
 
@@ -968,6 +750,8 @@
               typeBadge = '<span style="background: rgba(244, 63, 94, 0.1); border: 1px solid rgba(244, 63, 94, 0.3); color: #fb7185; padding: 2px 8px; border-radius: 12px; font-size: 10px;">📄 Proposal</span>';
             } else if (tLower.includes('gift') || tLower.includes('🎁')) {
               typeBadge = '<span style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; padding: 2px 8px; border-radius: 12px; font-size: 10px;">🎁 Gift</span>';
+            } else if (tLower.includes('performance')) {
+              typeBadge = '<span style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #f87171; padding: 2px 8px; border-radius: 12px; font-size: 10px;">📊 Performance</span>';
             }
 
             var gradeBadge = '<span style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 12px; font-size: 10px; color: #fff;">' + item.grade + '</span>';
