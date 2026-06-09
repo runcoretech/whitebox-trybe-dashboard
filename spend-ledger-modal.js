@@ -607,73 +607,17 @@
   // ==========================================
 
   function getEmployeeAllTouchpoints(empName, sector) {
-    var sectors = (sector === 'all' || !sector) ? ['prospects', 'customers', 'employees'] : [sector];
-    var timeframes = ['last5', '7d', '30d', '90d', 'ytd'];
-    var uniqueList = [];
-    var seen = {};
-    
-    var empData = (typeof employeeSectorTimeframeData !== 'undefined') ? employeeSectorTimeframeData[empName] : null;
-    if (!empData) {
-      // Fallback: try calling getEmployeeGraphHistory
-      if (typeof getEmployeeGraphHistory === 'function') {
-        for (var s = 0; s < sectors.length; s++) {
-          var sec = sectors[s];
-          for (var t = 0; t < timeframes.length; t++) {
-            var list = getEmployeeGraphHistory(empName, sec, timeframes[t]);
-            if (list && list.length) {
-              for (var i = 0; i < list.length; i++) {
-                var item = list[i];
-                var key = sec + '|' + item.date + '|' + item.type + '|' + item.grade + '|' + item.notes + '|' + (item.rep || '');
-                if (!seen[key]) {
-                  seen[key] = true;
-                  var clone = Object.assign({}, item);
-                  clone.sector = sec;
-                  uniqueList.push(clone);
-                }
-              }
-            }
-          }
-        }
-      }
-      return uniqueList;
+    if (typeof getClientHistory === 'function') {
+      return getClientHistory(empName);
     }
-    
-    for (var s = 0; s < sectors.length; s++) {
-      var sec = sectors[s];
-      if (!empData[sec]) continue;
-      for (var t = 0; t < timeframes.length; t++) {
-        var tf = timeframes[t];
-        var list = empData[sec][tf];
-        if (!list) continue;
-        for (var i = 0; i < list.length; i++) {
-          var item = list[i];
-          var key = sec + '|' + item.date + '|' + item.type + '|' + item.grade + '|' + item.notes + '|' + (item.rep || '');
-          if (!seen[key]) {
-            seen[key] = true;
-            var clone = Object.assign({}, item);
-            clone.sector = sec;
-            uniqueList.push(clone);
-          }
-        }
-      }
-    }
-    return uniqueList;
+    return [];
   }
 
   function getClientAllTouchpoints(clientName) {
-    var rawHistory = [];
     if (typeof getClientHistory === 'function') {
-      rawHistory = getClientHistory(clientName);
-    } else if (typeof clientGraphData !== 'undefined' && clientGraphData && clientGraphData[clientName]) {
-      rawHistory = clientGraphData[clientName];
+      return getClientHistory(clientName);
     }
-    var list = [];
-    for (var i = 0; i < rawHistory.length; i++) {
-      var clone = Object.assign({}, rawHistory[i]);
-      clone.sector = window.activeProfileType || 'customer';
-      list.push(clone);
-    }
-    return list;
+    return [];
   }
 
   function openTouchpointModal() {
@@ -699,13 +643,28 @@
         subtitleEl.textContent = 'Comprehensive audit of outreach touchpoints, relationship health trends, and notes for ' + empName + ' (' + profileType.toUpperCase() + ').';
       }
 
-      // Show/hide sector filter based on profile type
+      // Update sector filter options based on profile type
+      var sectorSel = document.getElementById('touchpoint-trend-modal-sector');
       var sectorFilterWrap = document.getElementById('touchpoint-sector-filter-wrap');
-      if (sectorFilterWrap) {
-        sectorFilterWrap.style.display = (profileType === 'employee') ? 'flex' : 'none';
+      if (sectorSel) {
+        if (profileType === 'employee') {
+          if (sectorFilterWrap) sectorFilterWrap.style.display = 'flex';
+          sectorSel.innerHTML = `
+            <option value="all">📋 All Touchpoints (Activity Card)</option>
+            <option value="customers">👥 Customer Notes Only</option>
+            <option value="prospects">🎯 Prospect Notes Only</option>
+            <option value="employees">👤 Employee Notes Only (Internal)</option>
+            <option value="report">📊 Performance Report Card</option>
+          `;
+        } else {
+          if (sectorFilterWrap) sectorFilterWrap.style.display = 'none';
+          sectorSel.innerHTML = `
+            <option value="all">📋 All Touchpoints</option>
+          `;
+        }
       }
 
-      // Fetch all touchpoints
+      // Fetch all touchpoints (live from getClientHistory)
       var allTouchpoints = [];
       if (profileType === 'employee') {
         allTouchpoints = getEmployeeAllTouchpoints(empName, 'all');
@@ -713,55 +672,10 @@
         allTouchpoints = getClientAllTouchpoints(empName);
       }
 
-      console.log('[TOUCHPOINT-TREND] Fetched ' + allTouchpoints.length + ' touchpoints.');
+      console.log('[TOUCHPOINT-TREND] Live touchpoints fetched:', allTouchpoints.length);
 
-      // Render table
       var tbody = document.getElementById('touchpoint-trend-modal-rows');
-      if (tbody) {
-        var html = '';
-        for (var i = 0; i < allTouchpoints.length; i++) {
-          var item = allTouchpoints[i];
-          
-          // Badges
-          var typeBadge = '<span style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 12px; font-size: 10px; color: #fff;">' + item.type + '</span>';
-          var tLower = item.type.toLowerCase();
-          if (tLower === 'call') {
-            typeBadge = '<span style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); color: #60a5fa; padding: 2px 8px; border-radius: 12px; font-size: 10px;">📞 Call</span>';
-          } else if (tLower === 'email') {
-            typeBadge = '<span style="background: rgba(99, 102, 241, 0.1); border: 1px solid rgba(99, 102, 241, 0.3); color: #818cf8; padding: 2px 8px; border-radius: 12px; font-size: 10px;">📧 Email</span>';
-          } else if (tLower === 'meeting') {
-            typeBadge = '<span style="background: rgba(168, 85, 247, 0.1); border: 1px solid rgba(168, 85, 247, 0.3); color: #c084fc; padding: 2px 8px; border-radius: 12px; font-size: 10px;">🤝 Meeting</span>';
-          } else if (tLower === 'proposal' || tLower === 'lunch') {
-            typeBadge = '<span style="background: rgba(244, 63, 94, 0.1); border: 1px solid rgba(244, 63, 94, 0.3); color: #fb7185; padding: 2px 8px; border-radius: 12px; font-size: 10px;">📄 Proposal</span>';
-          } else if (tLower === 'gift') {
-            typeBadge = '<span style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; padding: 2px 8px; border-radius: 12px; font-size: 10px;">🎁 Gift</span>';
-          }
-
-          var gradeBadge = '<span style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 12px; font-size: 10px; color: #fff;">' + item.grade + '</span>';
-          var gUpper = item.grade.toUpperCase();
-          if (gUpper === 'A') {
-            gradeBadge = '<span style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 700;">A</span>';
-          } else if (gUpper === 'C') {
-            gradeBadge = '<span style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); color: #fbbf24; padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 700;">C</span>';
-          } else if (gUpper === 'F') {
-            gradeBadge = '<span style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #f87171; padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 700;">F</span>';
-          }
-
-          html += '<tr data-index="' + i + '" style="border-bottom: 1px solid rgba(255,255,255,0.03); transition: all 0.2s;">'
-            + '<td style="padding: 12px 16px; font-weight: 700; color: #c084fc; font-family: \'Outfit\'; white-space: nowrap; vertical-align: top;">' + item.date + '</td>'
-            + '<td style="padding: 12px 16px; font-family: \'Outfit\'; font-weight: 700; vertical-align: top;">' + typeBadge + '</td>'
-            + '<td style="padding: 12px 16px; font-family: \'Outfit\'; font-weight: 700; vertical-align: top;">' + gradeBadge + '</td>'
-            + '<td style="padding: 12px 16px; color: #cbd5e1; font-family: \'Inter\'; font-size: 12px; line-height: 1.5; vertical-align: top;">'
-            + '<div>' + item.notes + '</div>'
-            + '<span style="color: #64748b; font-size: 10.5px; display: block; margin-top: 4px; font-weight: 500; font-family: \'Outfit\';">👤 Rep: <strong style="color: #94a3b8;">' + (item.rep || empName) + '</strong> &nbsp;|&nbsp; 🌐 Sector: <strong style="color: #94a3b8;">' + item.sector.toUpperCase() + '</strong></span>'
-            + '</td></tr>';
-        }
-        tbody.innerHTML = html;
-      }
-
-      // Initialize filter controls
       var searchInp = document.getElementById('touchpoint-trend-modal-search');
-      var sectorSel = document.getElementById('touchpoint-trend-modal-sector');
       var typeSel = document.getElementById('touchpoint-trend-modal-type');
       var gradeSel = document.getElementById('touchpoint-trend-modal-grade');
 
@@ -770,47 +684,315 @@
       if (typeSel) typeSel.value = 'all';
       if (gradeSel) gradeSel.value = 'all';
 
+      // Find the table header row to hide/show
+      var thead = modal.querySelector('table thead');
+
       function filterTouchpoints() {
         var sv = searchInp ? searchInp.value.toLowerCase().trim() : '';
         var secv = sectorSel ? sectorSel.value.toLowerCase().trim() : 'all';
         var tv = typeSel ? typeSel.value.toLowerCase().trim() : 'all';
         var gv = gradeSel ? gradeSel.value.toLowerCase().trim() : 'all';
 
+        if (secv === 'report') {
+          // Hide table header
+          if (thead) thead.style.display = 'none';
+          
+          // Generate Report Card HTML
+          const myClients = (typeof customersData !== 'undefined' ? customersData : []).filter(c => c.rep === empName);
+          const myProspects = (typeof prospectsData !== 'undefined' ? prospectsData : []).filter(p => p.rep === empName);
+          const totalManaged = myClients.length + myProspects.length;
+
+          // Filter activities logged by this employee
+          const profile = (window.supabaseProfiles || []).find(p => p.name === empName);
+          let myActivities = [];
+          if (profile && window.supabaseActivities) {
+            myActivities = window.supabaseActivities.filter(act => act.rep_id === profile.id);
+          }
+          const totalLogged = myActivities.length;
+
+          // Calculate Client Health Grade Profile from my activities
+          let gradeCounts = { A: 0, B: 0, C: 0, D: 0, F: 0 };
+          myActivities.forEach(act => {
+            const g = (act.grade || 'C').toUpperCase();
+            if (gradeCounts.hasOwnProperty(g)) {
+              gradeCounts[g]++;
+            } else {
+              gradeCounts['C']++;
+            }
+          });
+
+          // Calculate inactive clients/prospects (> 30 days) and urgent alerts (> 60 days or health < 60%)
+          let inactiveCount = 0;
+          let activeCount = 0;
+          let urgentAlerts = [];
+
+          const allManaged = [...myClients.map(c => ({...c, type: 'customer'})), ...myProspects.map(p => ({...p, type: 'prospect'}))];
+          allManaged.forEach(contact => {
+            let contactActivities = [];
+            if (window.supabaseActivities) {
+              contactActivities = window.supabaseActivities.filter(act => act.contact_id === contact.id);
+            }
+            let days = contact.inactiveDays || 0;
+            if (contactActivities.length > 0) {
+              let mostRecent = null;
+              contactActivities.forEach(act => {
+                const actDate = new Date(act.logged_at);
+                if (!mostRecent || actDate > mostRecent) {
+                  mostRecent = actDate;
+                }
+              });
+              if (mostRecent) {
+                days = Math.floor(Math.abs(new Date() - mostRecent) / (1000 * 60 * 60 * 24));
+              }
+            }
+
+            if (days > 30) {
+              inactiveCount++;
+            } else {
+              activeCount++;
+            }
+
+            const healthVal = parseInt(contact.health) || 84;
+            if (days > 60 || healthVal < 60) {
+              urgentAlerts.push({
+                name: contact.name,
+                type: contact.type,
+                inactiveDays: days,
+                health: healthVal,
+                rep: contact.rep
+              });
+            }
+          });
+
+          // Recent Gifts Sent (last 30 days)
+          let recentGiftsCount = 0;
+          const thirtyDaysAgo = new Date();
+          thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+          myActivities.forEach(act => {
+            if ((act.type.includes('Gift') || act.type.includes('🎁')) && new Date(act.logged_at) >= thirtyDaysAgo) {
+              recentGiftsCount++;
+            }
+          });
+
+          // Touchpoint Velocity (touchpoints per client per month)
+          const velocity = totalManaged > 0 ? (totalLogged / totalManaged).toFixed(1) : '0.0';
+
+          let reportHtml = `
+            <div class="report-card-container" style="padding: 16px; font-family: 'Outfit', sans-serif; display: flex; flex-direction: column; gap: 20px;">
+              <!-- Metric Cards Grid -->
+              <div class="report-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;">
+                <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
+                  <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Managed Accounts</span>
+                  <span style="font-size: 22px; font-weight: 700; color: #f8fafc; font-family: 'Outfit';">${totalManaged}</span>
+                  <span style="font-size: 10px; color: #94a3b8;">${myClients.length} Clients, ${myProspects.length} Prospects</span>
+                </div>
+
+                <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
+                  <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Active Status</span>
+                  <span style="font-size: 22px; font-weight: 700; color: #10b981; font-family: 'Outfit';">${activeCount} <span style="font-size: 14px; font-weight: 500; color: #64748b;">/ ${totalManaged}</span></span>
+                  <span style="font-size: 10px; color: #94a3b8;">${inactiveCount} inactive (>30d)</span>
+                </div>
+
+                <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
+                  <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Touchpoint Velocity</span>
+                  <span style="font-size: 22px; font-weight: 700; color: #3b82f6; font-family: 'Outfit';">${velocity}</span>
+                  <span style="font-size: 10px; color: #94a3b8;">Avg touches per account</span>
+                </div>
+
+                <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
+                  <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Recent Gifts (30d)</span>
+                  <span style="font-size: 22px; font-weight: 700; color: #a855f7; font-family: 'Outfit';">${recentGiftsCount}</span>
+                  <span style="font-size: 10px; color: #94a3b8;">Total campaign rewards</span>
+                </div>
+              </div>
+
+              <div style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; margin-top: 10px;">
+                <!-- Grade Distribution Chart -->
+                <div style="background: rgba(255, 255, 255, 0.01); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 12px; padding: 16px;">
+                  <h5 style="margin: 0 0 12px 0; font-size: 13px; color: #f8fafc; font-weight: 600; display: flex; align-items: center; gap: 6px;">
+                    📊 Client Health Grade Profile
+                  </h5>
+                  <div style="display: flex; flex-direction: column; gap: 10px;">
+          `;
+
+          Object.entries(gradeCounts).forEach(([grade, count]) => {
+            const pct = (count / (totalLogged || 1)) * 100;
+            let barColor = '#3b82f6';
+            if (grade === 'A') barColor = '#10b981';
+            else if (grade === 'B') barColor = '#34d399';
+            else if (grade === 'C') barColor = '#f59e0b';
+            else if (grade === 'D') barColor = '#f97316';
+            else if (grade === 'F') barColor = '#ef4444';
+
+            reportHtml += `
+                    <div style="display: flex; align-items: center; gap: 12px;">
+                      <span style="font-size: 12px; font-weight: 700; color: #94a3b8; width: 12px;">${grade}</span>
+                      <div style="flex: 1; height: 8px; background: rgba(255, 255, 255, 0.03); border-radius: 4px; overflow: hidden; position: relative;">
+                        <div style="width: ${pct}%; height: 100%; background: ${barColor}; border-radius: 4px;"></div>
+                      </div>
+                      <span style="font-size: 11px; font-weight: 600; color: #cbd5e1; width: 30px; text-align: right;">${count}</span>
+                    </div>
+            `;
+          });
+
+          reportHtml += `
+                  </div>
+                </div>
+
+                <!-- Urgent Alerts List -->
+                <div style="background: rgba(255, 255, 255, 0.01); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 12px; padding: 16px;">
+                  <h5 style="margin: 0 0 12px 0; font-size: 13px; color: #f8fafc; font-weight: 600; display: flex; align-items: center; gap: 6px;">
+                    ⚠️ Urgent Action Required
+                    <span style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; font-size: 9px; padding: 2px 6px; border-radius: 9999px;">${urgentAlerts.length} Alerts</span>
+                  </h5>
+                  <div style="display: flex; flex-direction: column; gap: 8px; max-height: 120px; overflow-y: auto; padding-right: 4px;">
+          `;
+
+          if (urgentAlerts.length === 0) {
+            reportHtml += `
+                    <div style="text-align: center; padding: 20px; color: #64748b; font-size: 12px;">
+                      ✨ All accounts healthy!
+                    </div>
+            `;
+          } else {
+            urgentAlerts.forEach(alert => {
+              reportHtml += `
+                    <div style="display: flex; align-items: center; justify-content: space-between; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 8px 10px; border-radius: 8px; gap: 8px;">
+                      <div style="display: flex; flex-direction: column; gap: 1px;">
+                        <span style="font-size: 11.5px; font-weight: 700; color: #f1f5f9;">${alert.name}</span>
+                        <span style="font-size: 9.5px; color: #94a3b8; text-transform: capitalize;">${alert.type} • Inactivity: <span style="color: #ef4444; font-weight: 600;">${alert.inactiveDays}d</span></span>
+                      </div>
+                      <button onclick="document.getElementById('btn-touchpoint-trend-close').click(); if(typeof window.switchToProfile === 'function') { window.switchToProfile('${alert.name}', '${alert.type}') }" style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); color: #3b82f6; font-size: 9.5px; font-family: 'Outfit'; font-weight: 600; padding: 3px 8px; border-radius: 6px; cursor: pointer;">
+                        View
+                      </button>
+                    </div>
+              `;
+            });
+          }
+
+          reportHtml += `
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+
+          if (tbody) {
+            tbody.innerHTML = `<tr style="background: transparent !important;"><td colspan="4" style="padding: 0; border: none;">${reportHtml}</td></tr>`;
+          }
+
+          // Update summary widgets
+          var statTotal = document.getElementById('touchpoint-stat-total');
+          var statAvgGrade = document.getElementById('touchpoint-stat-avg-grade');
+          var statSuccess = document.getElementById('touchpoint-stat-success-rate');
+          if (statTotal) statTotal.textContent = totalLogged;
+          if (statAvgGrade) {
+            let totalPoints = 0, sumPoints = 0;
+            myActivities.forEach(act => {
+              const g = act.grade.toUpperCase();
+              let pts = -1;
+              if (g === 'A') pts = 4;
+              else if (g === 'B') pts = 3;
+              else if (g === 'C') pts = 2;
+              else if (g === 'D') pts = 1;
+              else if (g === 'F') pts = 0;
+              if (pts !== -1) { totalPoints++; sumPoints += pts; }
+            });
+            if (totalPoints > 0) {
+              const avg = sumPoints / totalPoints;
+              let letter = 'C';
+              if (avg >= 3.5) letter = 'A';
+              else if (avg >= 2.5) letter = 'B';
+              else if (avg >= 1.5) letter = 'C';
+              else letter = 'F';
+              statAvgGrade.textContent = `${letter} (${avg.toFixed(1)})`;
+              statAvgGrade.style.color = letter === 'A' ? '#34d399' : (letter === 'F' ? '#f87171' : '#fbbf24');
+            } else {
+              statAvgGrade.textContent = '-';
+            }
+          }
+          if (statSuccess) {
+            const aCount = myActivities.filter(a => a.grade.toUpperCase() === 'A').length;
+            statSuccess.textContent = totalLogged > 0 ? `${Math.round((aCount / totalLogged) * 100)}%` : '0%';
+          }
+          var label = document.getElementById('touchpoint-trend-count-label');
+          if (label) label.textContent = 'Showing Performance Report Card';
+
+          return;
+        }
+
+        // Show table header
+        if (thead) thead.style.display = '';
+
+        var html = '';
         var visible = 0;
         var visibleA = 0;
         var gradeScoreSum = 0;
         var gradedPoints = 0;
 
-        if (tbody) {
-          var trs = tbody.getElementsByTagName('tr');
-          for (var f = 0; f < trs.length; f++) {
-            var d = allTouchpoints[f]; if (!d) continue;
-            var ms = !sv || d.notes.toLowerCase().indexOf(sv) !== -1 || d.date.toLowerCase().indexOf(sv) !== -1 || (d.rep && d.rep.toLowerCase().indexOf(sv) !== -1);
-            var msec = secv === 'all' || d.sector.toLowerCase() === secv;
-            var mt = tv === 'all' || d.type.toLowerCase() === tv || (tv === 'proposal' && d.type.toLowerCase() === 'lunch');
-            var mg = gv === 'all' || d.grade.toLowerCase() === gv;
+        for (var i = 0; i < allTouchpoints.length; i++) {
+          var item = allTouchpoints[i];
+          
+          var ms = !sv || item.notes.toLowerCase().indexOf(sv) !== -1 || item.date.toLowerCase().indexOf(sv) !== -1 || (item.rep && item.rep.toLowerCase().indexOf(sv) !== -1);
+          var msec = secv === 'all' || item.sector.toLowerCase() === secv;
+          var mt = tv === 'all' || item.type.toLowerCase() === tv;
+          var mg = gv === 'all' || item.grade.toLowerCase() === gv;
 
-            if (ms && msec && mt && mg) {
-              trs[f].style.display = '';
-              visible++;
-              if (d.grade.toUpperCase() === 'A') {
-                visibleA++;
-              }
-              var gScore = -1;
-              if (d.grade.toUpperCase() === 'A') gScore = 4;
-              else if (d.grade.toUpperCase() === 'B') gScore = 3;
-              else if (d.grade.toUpperCase() === 'C') gScore = 2;
-              else if (d.grade.toUpperCase() === 'D') gScore = 1;
-              else if (d.grade.toUpperCase() === 'F') gScore = 0;
-
-              if (gScore !== -1) {
-                gradeScoreSum += gScore;
-                gradedPoints++;
-              }
-            } else {
-              trs[f].style.display = 'none';
+          if (ms && msec && mt && mg) {
+            visible++;
+            if (item.grade.toUpperCase() === 'A') {
+              visibleA++;
             }
+            var gScore = -1;
+            if (item.grade.toUpperCase() === 'A') gScore = 4;
+            else if (item.grade.toUpperCase() === 'B') gScore = 3;
+            else if (item.grade.toUpperCase() === 'C') gScore = 2;
+            else if (item.grade.toUpperCase() === 'D') gScore = 1;
+            else if (item.grade.toUpperCase() === 'F') gScore = 0;
+
+            if (gScore !== -1) {
+              gradeScoreSum += gScore;
+              gradedPoints++;
+            }
+
+            // Badges
+            var typeBadge = '<span style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 12px; font-size: 10px; color: #fff;">' + item.type + '</span>';
+            var tLower = item.type.toLowerCase();
+            if (tLower.includes('call')) {
+              typeBadge = '<span style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); color: #60a5fa; padding: 2px 8px; border-radius: 12px; font-size: 10px;">📞 Call</span>';
+            } else if (tLower.includes('email')) {
+              typeBadge = '<span style="background: rgba(99, 102, 241, 0.1); border: 1px solid rgba(99, 102, 241, 0.3); color: #818cf8; padding: 2px 8px; border-radius: 12px; font-size: 10px;">📧 Email</span>';
+            } else if (tLower.includes('meeting')) {
+              typeBadge = '<span style="background: rgba(168, 85, 247, 0.1); border: 1px solid rgba(168, 85, 247, 0.3); color: #c084fc; padding: 2px 8px; border-radius: 12px; font-size: 10px;">🤝 Meeting</span>';
+            } else if (tLower.includes('proposal') || tLower.includes('lunch')) {
+              typeBadge = '<span style="background: rgba(244, 63, 94, 0.1); border: 1px solid rgba(244, 63, 94, 0.3); color: #fb7185; padding: 2px 8px; border-radius: 12px; font-size: 10px;">📄 Proposal</span>';
+            } else if (tLower.includes('gift') || tLower.includes('🎁')) {
+              typeBadge = '<span style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; padding: 2px 8px; border-radius: 12px; font-size: 10px;">🎁 Gift</span>';
+            }
+
+            var gradeBadge = '<span style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 12px; font-size: 10px; color: #fff;">' + item.grade + '</span>';
+            var gUpper = item.grade.toUpperCase();
+            if (gUpper === 'A') {
+              gradeBadge = '<span style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 700;">A</span>';
+            } else if (gUpper === 'C') {
+              gradeBadge = '<span style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); color: #fbbf24; padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 700;">C</span>';
+            } else if (gUpper === 'F') {
+              gradeBadge = '<span style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #f87171; padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 700;">F</span>';
+            }
+
+            html += '<tr data-index="' + i + '" style="border-bottom: 1px solid rgba(255,255,255,0.03); transition: all 0.2s;">'
+              + '<td style="padding: 12px 16px; font-weight: 700; color: #c084fc; font-family: \'Outfit\'; white-space: nowrap; vertical-align: top;">' + item.date + '</td>'
+              + '<td style="padding: 12px 16px; font-family: \'Outfit\'; font-weight: 700; vertical-align: top;">' + typeBadge + '</td>'
+              + '<td style="padding: 12px 16px; font-family: \'Outfit\'; font-weight: 700; vertical-align: top;">' + gradeBadge + '</td>'
+              + '<td style="padding: 12px 16px; color: #cbd5e1; font-family: \'Inter\'; font-size: 12px; line-height: 1.5; vertical-align: top;">'
+              + '<div>' + item.notes + '</div>'
+              + '<span style="color: #64748b; font-size: 10.5px; display: block; margin-top: 4px; font-weight: 500; font-family: \'Outfit\';">👤 Rep: <strong style="color: #94a3b8;">' + (item.rep || empName) + '</strong> &nbsp;|&nbsp; 🎯 Target: <strong style="color: #94a3b8;">' + (item.recipient || empName) + '</strong> &nbsp;|&nbsp; 🌐 Scope: <strong style="color: #94a3b8;">' + item.sector.toUpperCase() + '</strong></span>'
+              + '</td></tr>';
           }
+        }
+
+        if (tbody) {
+          tbody.innerHTML = html;
         }
 
         // Update stats
@@ -869,11 +1051,25 @@
       var csvBtn = document.getElementById('btn-touchpoint-trend-csv');
       if (csvBtn) {
         csvBtn.onclick = function() {
-          var csv = "Date,Type,Grade,Sector,Rep,Engagement Briefing & Notes\n";
+          var csv = "Date,Type,Grade,Sector,Recipient,Rep,Engagement Briefing & Notes\n";
           for (var c = 0; c < allTouchpoints.length; c++) {
             var p = allTouchpoints[c];
-            var cleanNotes = p.notes.replace(/"/g, '""');
-            csv += '"' + p.date + '","' + p.type + '","' + p.grade + '","' + p.sector.toUpperCase() + '","' + (p.rep || empName) + '","' + cleanNotes + '"\n';
+            
+            // Apply active filters to CSV output
+            var sv = searchInp ? searchInp.value.toLowerCase().trim() : '';
+            var secv = sectorSel ? sectorSel.value.toLowerCase().trim() : 'all';
+            var tv = typeSel ? typeSel.value.toLowerCase().trim() : 'all';
+            var gv = gradeSel ? gradeSel.value.toLowerCase().trim() : 'all';
+
+            var ms = !sv || p.notes.toLowerCase().indexOf(sv) !== -1 || p.date.toLowerCase().indexOf(sv) !== -1 || (p.rep && p.rep.toLowerCase().indexOf(sv) !== -1);
+            var msec = secv === 'all' || p.sector.toLowerCase() === secv || (secv === 'report' && p.sector.toLowerCase() === 'employees');
+            var mt = tv === 'all' || p.type.toLowerCase() === tv;
+            var mg = gv === 'all' || p.grade.toLowerCase() === gv;
+
+            if (ms && msec && mt && mg) {
+              var cleanNotes = p.notes.replace(/"/g, '""');
+              csv += '"' + p.date + '","' + p.type + '","' + p.grade + '","' + p.sector.toUpperCase() + '","' + (p.recipient || '') + '","' + (p.rep || empName) + '","' + cleanNotes + '"\n';
+            }
           }
           var blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
           var a = document.createElement('a');
@@ -949,6 +1145,16 @@
       });
     }
 
+    var timelineFullReportBtn = document.getElementById('btn-timeline-full-report');
+    if (timelineFullReportBtn) {
+      console.log('[DASHBOARD-MODALS] Binding click listener to btn-timeline-full-report');
+      timelineFullReportBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        openTouchpointModal();
+      });
+    }
+
     // Also bind on DOMContentLoaded as a safety net
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', function() {
@@ -971,6 +1177,14 @@
         var touchBtn2 = document.getElementById('btn-profile-touchpoint-report');
         if (touchBtn2) {
           touchBtn2.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            openTouchpointModal();
+          });
+        }
+        var timelineFullBtn2 = document.getElementById('btn-timeline-full-report');
+        if (timelineFullBtn2) {
+          timelineFullBtn2.addEventListener('click', function(e) {
             e.preventDefault();
             e.stopPropagation();
             openTouchpointModal();

@@ -18,6 +18,16 @@ const userEmails = {
 };
 
 async function syncSupabaseSession(username, role) {
+  console.log("[SUPABASE AUTH] auth start");
+  if (!supabase) {
+    console.error("[SUPABASE AUTH] auth failure: Supabase client is not initialized.");
+    return;
+  }
+  if (!import.meta.env.DEV) {
+    console.warn("[SUPABASE AUTH] Background auto-login is disabled in production.");
+    console.error("[SUPABASE AUTH] auth failure: Background auto-login is disabled in production.");
+    return;
+  }
   let targetUser = username;
   if (role === 'revoked') {
     targetUser = 'Charlie Brown';
@@ -32,154 +42,592 @@ async function syncSupabaseSession(username, role) {
   const email = userEmails[targetUser] || 'owner@whitebox.com';
   console.log(`[SUPABASE AUTH] Syncing session for username "${targetUser}", email: "${email}", role: "${role}"`);
   
+  const password = import.meta.env.VITE_DEMO_PASSWORD;
+  if (!password) {
+    console.error("[SUPABASE AUTH] auth failure: VITE_DEMO_PASSWORD is not configured in .env!");
+    return;
+  }
+
   try {
     const { data, error } = await supabase.auth.signInWithPassword({
       email: email,
-      password: 'wb_password_2026!'
+      password: password
     });
     
     if (error) {
-      console.error("[SUPABASE AUTH] Error signing in:", error.message);
+      console.error("[SUPABASE AUTH] auth failure: Error signing in:", error.message);
     } else {
-      console.log("[SUPABASE AUTH] Sign in successful. User ID:", data.user.id);
+      console.log("[SUPABASE AUTH] auth success: Sign in successful. User ID:", data.user.id);
+      try {
+        const { data: profile, error: profileErr } = await supabase
+          .from('profiles')
+          .select('id, workspace_id, role')
+          .eq('id', data.user.id)
+          .single();
+        if (profileErr) {
+          console.error("[SUPABASE AUTH] Profile query failed:", profileErr.message || profileErr);
+        } else {
+          window.activeWorkspaceId = profile.workspace_id;
+          window.activeUserId = profile.id;
+          window.activeUserRole = profile.role;
+          console.log(`[SUPABASE AUTH] Profile synced. Workspace: ${window.activeWorkspaceId}, User ID: ${window.activeUserId}, Role: ${window.activeUserRole}`);
+        }
+      } catch (profEx) {
+        console.error("[SUPABASE AUTH] Exception querying profile:", profEx);
+      }
     }
   } catch (err) {
-    console.error("[SUPABASE AUTH] Exception during sign in:", err);
+    console.error("[SUPABASE AUTH] auth failure: Exception during sign in:", err);
   }
+}
+
+window.supabaseKPIs = null;
+window.supabaseLoading = true;
+window.supabaseError = null;
+
+function updateConnectionStatusIndicator() {
+  let indicator = document.getElementById('supabase-connection-status');
+  if (!indicator) {
+    const userInfo = document.querySelector('.sidebar-user-info');
+    if (userInfo) {
+      indicator = document.createElement('span');
+      indicator.id = 'supabase-connection-status';
+      indicator.style.fontSize = '9px';
+      indicator.style.fontWeight = 'bold';
+      indicator.style.marginTop = '4px';
+      indicator.style.display = 'block';
+      indicator.style.textTransform = 'uppercase';
+      indicator.style.letterSpacing = '0.5px';
+      userInfo.appendChild(indicator);
+    }
+  }
+
+  if (indicator) {
+    if (window.supabaseLoading) {
+      indicator.textContent = '● Loading data...';
+      indicator.style.color = '#a855f7'; // purple
+      indicator.style.display = 'block';
+    } else if (window.supabaseError) {
+      indicator.textContent = '● Connection issue';
+      indicator.style.color = '#ef4444'; // red
+      indicator.style.display = 'block';
+    } else if (window.supabaseKPIs) {
+      indicator.textContent = '● Live Data';
+      indicator.style.color = '#22c55e'; // green
+      indicator.style.display = 'block';
+    } else {
+      indicator.style.display = 'none';
+    }
+  }
+}
+
+function triggerAllKPIUpdates() {
+  try {
+    if (typeof updateOverviewDashboard === 'function') updateOverviewDashboard();
+    if (typeof customersData !== 'undefined' && typeof updateCustomersScorecards === 'function') {
+      updateCustomersScorecards(customersData);
+    }
+    if (typeof prospectsData !== 'undefined' && typeof updateProspectsScorecards === 'function') {
+      updateProspectsScorecards(prospectsData);
+    }
+    if (typeof updateGiftingSpendDashboard === 'function') updateGiftingSpendDashboard();
+  } catch (uiErr) {
+    console.warn("[SUPABASE DATA] UI update failed:", uiErr);
+  }
+}
+
+window.supabaseLeaderboardLive = null;
+window.supabaseRecoveryLeaderboard = null;
+
+function getLiveEmployeesList() {
+  if (!window.supabaseLeaderboardLive) return [];
+  const allEmployees = typeof employeesData !== 'undefined' ? employeesData : [];
+  const mapped = window.supabaseLeaderboardLive.map(dbEmp => {
+    const staticEmp = allEmployees.find(e => e.name === dbEmp.name) || {};
+    let initials = staticEmp.initials || dbEmp.name.split(' ').map(n => n[0]).join('');
+    let roleType = staticEmp.roleType || 'reps';
+    if (dbEmp.role === 'owner') roleType = 'executives';
+    else if (dbEmp.role === 'executive') roleType = 'executives';
+    else if (dbEmp.role === 'manager') roleType = 'managers';
+    else if (dbEmp.role === 'rep') roleType = 'reps';
+
+    let managerName = 'Paul K.';
+    if (window.supabaseProfiles) {
+      const profItem = window.supabaseProfiles.find(p => p.name === dbEmp.name);
+      if (profItem && profItem.manager_id) {
+        const mgrItem = window.supabaseProfiles.find(p => p.id === profItem.manager_id);
+        if (mgrItem) {
+          managerName = mgrItem.name;
+        } else {
+          managerName = 'N/A';
+        }
+      } else if (profItem) {
+        managerName = 'N/A';
+      }
+    } else {
+      managerName = staticEmp.manager || (roleType === 'reps' ? (dbEmp.name === 'Eve Tenant' ? 'N/A' : 'Marcus Dupond') : 'Paul K.');
+    }
+
+    let calcInactiveDays = staticEmp.inactiveDays || 0;
+    if (window.supabaseProfiles && window.supabaseActivities) {
+      const profItem = window.supabaseProfiles.find(p => p.name === dbEmp.name);
+      if (profItem) {
+        const employeeNotes = window.supabaseActivities.filter(act => act.rep_id === profItem.id && (act.contact_id === null || act.contact_id === undefined));
+        if (employeeNotes.length > 0) {
+          let mostRecent = null;
+          employeeNotes.forEach(act => {
+            const actDate = new Date(act.logged_at);
+            if (!mostRecent || actDate > mostRecent) {
+              mostRecent = actDate;
+            }
+          });
+          if (mostRecent) {
+            const diffTime = Math.abs(new Date() - mostRecent);
+            const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+            calcInactiveDays = diffDays;
+          }
+        }
+      }
+    }
+
+    return {
+      ...staticEmp,
+      name: dbEmp.name,
+      role: staticEmp.role || dbEmp.role || 'Sales Representative',
+      roleType: roleType,
+      initials: initials,
+      colorClass: staticEmp.colorClass || 'bg-purple',
+      health: dbEmp.avg_health,
+      prospects: dbEmp.prospects,
+      customers: dbEmp.clients,
+      gifts: dbEmp.gifts_sent,
+      touchpoints: dbEmp.touchpoints,
+      manager: managerName,
+      inactiveDays: calcInactiveDays
+    };
+  });
+  return mapped.filter(emp => emp.role !== 'owner' && emp.name !== 'Paul K.');
 }
 
 async function fetchDashboardData() {
-  console.log("[SUPABASE DATA] Fetching all dashboard data from Supabase...");
+  console.log("[SUPABASE DATA] fetch start");
+  window.supabaseLoading = true;
+  window.supabaseError = null;
+  window.supabaseKPIs = null;
+  window.supabaseLeaderboardLive = null;
+  window.supabaseRecoveryLeaderboard = null;
+  updateConnectionStatusIndicator();
+  triggerAllKPIUpdates();
+
+  if (!supabase) {
+    console.error("[SUPABASE DATA] fetch failure: Supabase client is not initialized.");
+    window.supabaseLoading = false;
+    window.supabaseError = new Error("Supabase client is not initialized");
+    updateConnectionStatusIndicator();
+    triggerAllKPIUpdates();
+    return;
+  }
+  
   try {
-    // 1. Fetch profiles to populate employeesData
-    const { data: profiles, error: pError } = await supabase.from('profiles').select('*');
-    if (pError) throw pError;
+    console.log("[SUPABASE DATA] Fetching live KPIs, leaderboards, and contacts from Supabase...");
     
-    // Fetch leaderboard live stats to enrich profiles
-    const { data: leaderboard, error: lError } = await supabase.from('leaderboard_live').select('*');
-    if (lError) throw lError;
+    // 1. Fetch get_kpi_summary RPC
+    const { data: kpiSummary, error: kpiError } = await supabase.rpc('get_kpi_summary', { timeframe_days: 30 });
+    if (kpiError) {
+      console.error("[SUPABASE DATA] get_kpi_summary RPC failed:", kpiError.message || kpiError);
+      throw kpiError;
+    }
+    
+    // 2. Query delivered and queued gifts table aggregate
+    const { data: giftsData, error: giftsError } = await supabase
+      .from('gifts')
+      .select('amount, contact_id, status, created_at');
+    if (giftsError) {
+      console.error("[SUPABASE DATA] gifts query failed:", giftsError.message || giftsError);
+      throw giftsError;
+    }
+    
+    // 3. Query leaderboard_live view
+    const { data: leaderboardLive, error: leaderboardError } = await supabase
+      .from('leaderboard_live')
+      .select('*');
+    if (leaderboardError) {
+      console.error("[SUPABASE DATA] leaderboard_live query failed:", leaderboardError.message || leaderboardError);
+      throw leaderboardError;
+    }
 
-    // Fetch contacts decay status
-    const { data: decayStatus, error: dError } = await supabase.from('contacts_decay_status').select('*');
-    if (dError) throw dError;
+    // 4. Query recovery_leaderboard view
+    const { data: recoveryLeaderboard, error: recoveryError } = await supabase
+      .from('recovery_leaderboard')
+      .select('*');
+    if (recoveryError) {
+      console.error("[SUPABASE DATA] recovery_leaderboard query failed:", recoveryError.message || recoveryError);
+      throw recoveryError;
+    }
 
-    // 2. Fetch contacts joined with organizations
-    const { data: contacts, error: cError } = await supabase.from('contacts').select(`
-      *,
-      organizations:org_id (*)
-    `);
-    if (cError) throw cError;
+    // 5. Query contacts with nested organization and rep details
+    const { data: contactsDb, error: contactsError } = await supabase
+      .from('contacts')
+      .select(`
+        id,
+        name,
+        email,
+        phone,
+        assigned_rep_id,
+        relationship_health,
+        ai_recommendation,
+        org_id,
+        created_at,
+        organizations (
+          name,
+          sector,
+          category,
+          street_address,
+          city,
+          province,
+          postal_code,
+          phone,
+          email,
+          created_at
+        ),
+        profiles (
+          name
+        )
+      `);
+    if (contactsError) {
+      console.error("[SUPABASE DATA] contacts query failed:", contactsError.message || contactsError);
+      throw contactsError;
+    }
 
-    // Fetch gifts count per contact
-    const { data: gifts, error: gError } = await supabase.from('gifts').select('id, contact_id, status, amount');
-    if (gError) throw gError;
+    // 6. Query contacts_decay_status view
+    const { data: decayDb, error: decayError } = await supabase
+      .from('contacts_decay_status')
+      .select('contact_id, inactive_days, computed_health');
+    if (decayError) {
+      console.error("[SUPABASE DATA] contacts_decay_status query failed:", decayError.message || decayError);
+      throw decayError;
+    }
 
-    // Parse and map profiles (employeesData)
-    employeesData = profiles.map(p => {
-      const leader = leaderboard.find(l => l.id === p.id) || {};
-      const initials = p.name.split(' ').map(n => n[0]).join('').toUpperCase();
-      let roleType = 'reps';
-      let roleLabel = 'Senior Sales Representative';
-      if (p.role === 'owner') {
-        roleType = 'executives';
-        roleLabel = 'Managing Partner & CEO';
-      } else if (p.role === 'executive') {
-        roleType = 'executives';
-        roleLabel = 'Chief People Officer';
-      } else if (p.role === 'manager') {
-        roleType = 'managers';
-        roleLabel = 'Sales Manager';
-      }
-      
-      const managerName = profiles.find(m => m.id === p.manager_id)?.name || (p.role === 'owner' ? 'Board / Shareholders' : 'Gregory Sterling');
+    // 7. Query activities to count touchpoints per contact
+    const { data: activitiesDb, error: activitiesError } = await supabase
+      .from('activities')
+      .select('id, contact_id, rep_id, type, grade, notes, logged_at, profiles(name)');
+    if (activitiesError) {
+      console.error("[SUPABASE DATA] activities query failed:", activitiesError.message || activitiesError);
+      throw activitiesError;
+    }
+    window.supabaseActivities = activitiesDb || [];
 
-      return {
-        name: p.name,
-        initials: initials,
-        role: roleLabel,
-        roleType: roleType,
-        manager: managerName,
-        prospects: parseInt(leader.prospects) || 0,
-        customers: parseInt(leader.clients) || 0,
-        gifts: parseInt(leader.gifts_sent) || 0,
-        giftsReceived: p.role === 'owner' ? 12 : 8,
-        inactiveDays: p.role === 'owner' ? 5 : 8,
-        date: "May 20, 2026",
-        health: parseInt(leader.avg_health) || 95,
-        colorClass: p.role === 'rep' ? 'bg-teal' : (p.role === 'manager' ? 'bg-purple' : 'bg-blue'),
-        sector: p.role === 'owner' ? 'Owner Workspace' : 'New Territory',
-        streetAddress: "120 Bay St",
-        contact: p.name,
-        city: "Miami",
-        province: "FL",
-        postal: "33131",
-        prospect: "N/A",
-        customer: "N/A",
-        phone: p.email.includes('owner') ? '(800) 555-0101' : '(416) 555-0112',
-        email: p.email,
-        aiRecommend: p.role === 'owner' ? "Keep high engagement with strategic partners." : "Onboarded fresh today.",
-        isWorking: p.status === 'active',
-        activeTask: p.status === 'active' ? "Reviewing Relationship OS Workspace onboarding guides" : "",
-        activeSince: p.status === 'active' ? "09:00 AM" : "",
-        sessionDuration: "00:05:00",
-        todayTouches: "0 touches logged"
-      };
-    });
+    // 8. Query profiles table to resolve live manager relationships
+    const { data: profilesDb, error: profilesError } = await supabase
+      .from('profiles')
+      .select('id, name, email, role, manager_id, status, workspace_id');
+    if (profilesError) {
+      console.error("[SUPABASE DATA] profiles query failed:", profilesError.message || profilesError);
+      throw profilesError;
+    }
+    window.supabaseProfiles = profilesDb || [];
+    
+    const deliveredCount = giftsData ? giftsData.filter(g => g.status === 'delivered').length : 0;
+    const deliveredSpend = giftsData ? giftsData.filter(g => g.status === 'delivered').reduce((sum, g) => sum + (parseFloat(g.amount) || 0), 0) : 0;
+    const queuedCount = giftsData ? giftsData.filter(g => ['pending', 'awaiting_approval', 'awaiting_design', 'quote_ready', 'approved', 'dispatched'].includes(g.status)).length : 0;
+    
+    console.log("[SUPABASE DATA] Live KPIs, Leaderboards, and Contacts retrieved successfully.");
 
-    // Parse and map contacts (customersData and prospectsData)
-    const allContactsMapped = contacts.map(c => {
-      const org = c.organizations || {};
-      const repProfile = profiles.find(p => p.id === c.assigned_rep_id) || {};
-      const decay = decayStatus.find(d => d.contact_id === c.id) || {};
-      const contactGifts = gifts.filter(g => g.contact_id === c.id);
-      const initials = org.name ? org.name.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase() : 'CO';
+    // Build helper maps for counts and decay
+    const contactGiftsMap = {};
+    if (giftsData) {
+      giftsData.forEach(g => {
+        if (g.contact_id && g.status === 'delivered') {
+          contactGiftsMap[g.contact_id] = (contactGiftsMap[g.contact_id] || 0) + 1;
+        }
+      });
+    }
 
-      // Category maps to hot/warm/cold for prospects, or org category for customers
-      let category = org.category;
-      if (org.category === 'prospect') {
-        const computedHealth = parseInt(decay.computed_health) || 75;
-        if (computedHealth >= 80) category = 'hot';
-        else if (computedHealth >= 50) category = 'warm';
-        else category = 'cold';
-      }
+    const contactActivitiesMap = {};
+    if (activitiesDb) {
+      activitiesDb.forEach(act => {
+        if (act.contact_id) {
+          contactActivitiesMap[act.contact_id] = (contactActivitiesMap[act.contact_id] || 0) + 1;
+        }
+      });
+    }
 
-      return {
-        id: c.id,
-        name: org.name || 'Unknown Org',
-        initials: initials,
-        sector: org.sector || 'N/A',
-        rep: repProfile.name || 'Unassigned',
-        prospects: org.category === 'prospect' ? 1 : 0,
-        customers: org.category !== 'prospect' ? 1 : 0,
-        gifts: contactGifts.length,
-        inactiveDays: Math.round(decay.inactive_days) || 0,
-        health: parseInt(decay.computed_health) || parseInt(c.relationship_health) || 100,
-        colorClass: org.category === 'prospect' ? 'bg-amber' : 'bg-blue',
-        streetAddress: org.street_address || '120 Broadway',
-        contact: c.name,
-        city: org.city || 'New York',
-        province: org.province || 'NY',
-        postal: org.postal_code || '10005',
-        prospect: org.category === 'prospect' ? "2026-02-14" : "N/A",
-        customer: org.category !== 'prospect' ? "2026-03-20" : "N/A",
-        phone: c.phone || org.phone || '(212) 555-0155',
-        email: c.email || org.email || 'contact@apex.com',
-        aiRecommend: c.ai_recommendation || 'No recommendation logged.',
-        category: category,
-        dealValue: org.category === 'prospect' ? 75000 : undefined
-      };
-    });
+    const decayMap = {};
+    if (decayDb) {
+      decayDb.forEach(d => {
+        decayMap[d.contact_id] = d;
+      });
+    }
 
-    // Separate customers and prospects
-    customersData = allContactsMapped.filter(c => c.category !== 'hot' && c.category !== 'warm' && c.category !== 'cold' && c.category !== 'prospect');
-    prospectsData = allContactsMapped.filter(c => c.category === 'hot' || c.category === 'warm' || c.category === 'cold' || c.category === 'prospect');
+    const colors = ['bg-blue', 'bg-indigo', 'bg-red', 'bg-purple', 'bg-green', 'bg-pink', 'bg-orange'];
 
-    window.employeesData = employeesData;
-    console.log(`[SUPABASE DATA] Successfully loaded ${employeesData.length} profiles, ${customersData.length} customers, ${prospectsData.length} prospects.`);
+    const tempCustomers = [];
+    const tempProspects = [];
+
+    if (contactsDb) {
+      contactsDb.forEach(c => {
+        const org = (Array.isArray(c.organizations) ? c.organizations[0] : c.organizations) || {};
+        const profile = (Array.isArray(c.profiles) ? c.profiles[0] : c.profiles) || {};
+        const decay = decayMap[c.id] || {};
+
+        const orgCategory = org.category || 'prospect';
+        const isProspect = (orgCategory === 'prospect');
+
+        // Initials from org name
+        const orgName = org.name || c.name || 'Unknown';
+        const initials = orgName.split(' ').map(w => w[0]).join('').substring(0, 2).toUpperCase();
+
+        // Deterministic color class
+        let hashCodeVal = 0;
+        for (let i = 0; i < c.id.length; i++) {
+          hashCodeVal = c.id.charCodeAt(i) + ((hashCodeVal << 5) - hashCodeVal);
+        }
+        const colorClass = colors[Math.abs(hashCodeVal) % colors.length];
+
+        // Format dates
+        const prospectDate = org.created_at ? new Date(org.created_at).toISOString().split('T')[0] : 'N/A';
+        const customerDate = !isProspect && c.created_at ? new Date(c.created_at).toISOString().split('T')[0] : 'N/A';
+
+        // Relationship health mapping: fall back to base health if decay is 999 days inactive (no real decay tracking)
+        const health = (decay && typeof decay.inactive_days === 'number' && decay.inactive_days !== 999) 
+          ? decay.computed_health 
+          : (c.relationship_health || 100);
+
+        // Map warmth category for prospects
+        let prospectCategory = 'cold';
+        if (health >= 80) prospectCategory = 'hot';
+        else if (health >= 50) prospectCategory = 'warm';
+
+        // Map item
+        const item = {
+          id: c.id,
+          orgId: c.org_id,
+          assignedRepId: c.assigned_rep_id,
+          name: orgName,
+          initials: initials,
+          sector: org.sector || 'N/A',
+          rep: profile.name || 'Unassigned',
+          prospects: contactActivitiesMap[c.id] || 0, // activities/calls count
+          customers: 0,
+          gifts: contactGiftsMap[c.id] || 0,
+          inactiveDays: typeof decay.inactive_days === 'number' ? decay.inactive_days : 0,
+          health: health,
+          colorClass: colorClass,
+          streetAddress: org.street_address || 'N/A',
+          contact: c.name,
+          city: org.city || 'N/A',
+          province: org.province || 'N/A',
+          postal: org.postal_code || 'N/A',
+          prospect: prospectDate,
+          customer: customerDate,
+          phone: c.phone || 'N/A',
+          email: c.email || 'N/A',
+          aiRecommend: c.ai_recommendation || 'No recommendations.',
+          category: isProspect ? prospectCategory : orgCategory,
+          dealValue: isProspect ? (50000 + (Math.abs(hashCodeVal) % 30) * 5000) : 0
+        };
+
+        if (isProspect) {
+          tempProspects.push(item);
+        } else {
+          tempCustomers.push(item);
+        }
+      });
+    }
+
+    customersData = tempCustomers;
+    prospectsData = tempProspects;
+    
+    // Store in window state
+    window.supabaseKPIs = {
+      clients: kpiSummary.clients || 0,
+      prospects: kpiSummary.prospects || 0,
+      avg_health: kpiSummary.avg_health || 100,
+      neglected_count: kpiSummary.neglected_count || 0,
+      recovery_queue: kpiSummary.recovery_queue || 0,
+      deliveredCount,
+      deliveredSpend,
+      queuedCount
+    };
+    window.supabaseLeaderboardLive = leaderboardLive || [];
+    window.supabaseRecoveryLeaderboard = recoveryLeaderboard || [];
+    window.supabaseTouchpointsCount = activitiesDb ? activitiesDb.length : 0;
+    
+    window.supabaseGifts = giftsData || [];
+    window.supabaseActivities = activitiesDb || [];
+    if (typeof updateDynamicAnalyticsDataSets === 'function') {
+      updateDynamicAnalyticsDataSets();
+    }
+    
+    window.supabaseLoading = false;
+    window.supabaseError = null;
+    
+    // Update local spend/gifts count variables so future transactions build on top
+    if (typeof currentGiftsCount !== 'undefined') {
+      currentGiftsCount = deliveredCount;
+    }
+    if (typeof currentSpendAmount !== 'undefined') {
+      currentSpendAmount = deliveredSpend;
+    }
+
+    try {
+      updateTabPillBadges();
+    } catch (badgeErr) {
+      console.warn("[SUPABASE DATA] Badges update failed:", badgeErr);
+    }
+    
   } catch (err) {
-    console.error("[SUPABASE DATA] Error fetching dashboard data:", err);
+    console.error("[SUPABASE DATA] Fetch failed. Error details:", err);
+    window.supabaseKPIs = null;
+    window.supabaseLeaderboardLive = null;
+    window.supabaseRecoveryLeaderboard = null;
+    customersData = [];
+    prospectsData = [];
+    window.supabaseLoading = false;
+    window.supabaseError = err;
+  } finally {
+    updateConnectionStatusIndicator();
+    triggerAllKPIUpdates();
+    try {
+      if (typeof renderCustomersList === 'function') renderCustomersList();
+      if (typeof renderProspectsList === 'function') renderProspectsList();
+      if (typeof renderLeaderboard === 'function') renderLeaderboard();
+      if (typeof renderEmployeeLeaderboard === 'function') renderEmployeeLeaderboard();
+      if (typeof renderEmployeesSubLeaderboard === 'function') renderEmployeesSubLeaderboard();
+      if (typeof renderOverviewRegistry === 'function') renderOverviewRegistry();
+      if (typeof renderActiveEmployeesList === 'function') renderActiveEmployeesList();
+    } catch (uiErr) {
+      console.warn("[SUPABASE DATA] UI rendering failed:", uiErr);
+    }
   }
 }
+
+function updateDynamicAnalyticsDataSets() {
+  if (!window.supabaseGifts || !window.supabaseActivities) return;
+
+  const now = new Date();
+  const ranges = ['live', 'yesterday', '7d', '30d', '90d', 'ytd', 'all'];
+
+  // Calculate active and total employees dynamically from database-loaded state
+  let activeEmployeesCount = 0;
+  let totalEmployeesCount = 0;
+  try {
+    const allEmployees = typeof getLiveEmployeesList === 'function' ? getLiveEmployeesList() : [];
+    activeEmployeesCount = allEmployees.filter(emp => emp.isWorking === true).length;
+    // Filter out Owner 'Paul K.' to count actual staff/reps
+    totalEmployeesCount = allEmployees.filter(emp => emp.role !== 'owner' && emp.name !== 'Paul K.').length;
+  } catch (err) {
+    console.warn("[SUPABASE DATA] Failed to compute dynamic employee counts:", err);
+  }
+
+  ranges.forEach(range => {
+    let startDate;
+    let endDate = new Date();
+
+    switch (range) {
+      case 'live':
+        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+        break;
+      case 'yesterday':
+        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+        endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59);
+        break;
+      case '7d':
+        startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        break;
+      case '30d':
+        startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        break;
+      case '90d':
+        startDate = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+        break;
+      case 'ytd':
+        startDate = new Date(now.getFullYear(), 0, 1);
+        break;
+      case 'all':
+      default:
+        startDate = new Date(2025, 0, 1);
+        break;
+    }
+
+    const rangeActivities = window.supabaseActivities.filter(act => {
+      if (!act.logged_at) return false;
+      const t = new Date(act.logged_at);
+      return t >= startDate && t <= endDate;
+    });
+
+    const rangeGifts = window.supabaseGifts.filter(g => {
+      if (!g.created_at) return false;
+      const t = new Date(g.created_at);
+      return t >= startDate && t <= endDate;
+    });
+
+    const touchpointsCount = rangeActivities.length;
+    const giftsCount = rangeGifts.length;
+
+    let giftingTrend = [0, 0, 0, 0, 0, 0];
+    let giftingLabels = [];
+    let healthLabels = [];
+
+    if (range === 'live' || range === 'yesterday') {
+      giftingLabels = ['8am', '10am', '12pm', '2pm', '4pm', '6pm'];
+      healthLabels = ['8am', '10am', '12pm', '2pm', '4pm', '6pm'];
+      
+      rangeGifts.forEach(g => {
+        const hour = new Date(g.created_at).getHours();
+        if (hour < 10) giftingTrend[0]++;
+        else if (hour < 12) giftingTrend[1]++;
+        else if (hour < 14) giftingTrend[2]++;
+        else if (hour < 16) giftingTrend[3]++;
+        else if (hour < 18) giftingTrend[4]++;
+        else giftingTrend[5]++;
+      });
+    } else {
+      const totalTime = endDate.getTime() - startDate.getTime();
+      const chunkTime = totalTime / 6;
+
+      for (let i = 0; i < 6; i++) {
+        const chunkStart = new Date(startDate.getTime() + i * chunkTime);
+        const chunkEnd = new Date(startDate.getTime() + (i + 1) * chunkTime);
+        
+        giftingLabels.push(chunkStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+        healthLabels.push(chunkStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+
+        const chunkGifts = rangeGifts.filter(g => {
+          const t = new Date(g.created_at);
+          return t >= chunkStart && t < chunkEnd;
+        });
+        giftingTrend[i] = chunkGifts.length;
+      }
+    }
+
+    if (analyticsDataSets[range]) {
+      analyticsDataSets[range].touchpoints = touchpointsCount;
+      analyticsDataSets[range].gifts = giftsCount;
+      analyticsDataSets[range].giftingTrend = giftingTrend;
+      analyticsDataSets[range].giftingLabels = giftingLabels;
+      analyticsDataSets[range].healthLabels = healthLabels;
+      
+      // Override employee counts to align scoreboard and list view exactly
+      if (range === 'live' || range === 'yesterday') {
+        analyticsDataSets[range].employees = activeEmployeesCount;
+      } else {
+        analyticsDataSets[range].employees = totalEmployeesCount;
+      }
+
+      // Override client/prospect/health numbers with database aggregates
+      if (window.supabaseKPIs) {
+        analyticsDataSets[range].clients = window.supabaseKPIs.clients || 0;
+        analyticsDataSets[range].prospects = window.supabaseKPIs.prospects || 0;
+        analyticsDataSets[range].totalProspects = window.supabaseKPIs.prospects || 0;
+        analyticsDataSets[range].health = window.supabaseKPIs.avg_health || 100;
+      }
+    }
+  });
+}
+
 
 window.onerror = function(message, source, lineno, colno, error) {
   const div = document.createElement('div');
@@ -460,8 +908,14 @@ window.updateCosmoAIAudits = function(role) {
 
 
 // Helper to calculate actual logged touchpoints count for an employee dynamically
-
 window.getEmployeeTouchpointsCount = function(empName) {
+  if (typeof window.supabaseProfiles !== 'undefined' && typeof window.supabaseActivities !== 'undefined') {
+    const profile = window.supabaseProfiles.find(p => p.name.trim().toLowerCase() === empName.trim().toLowerCase());
+    if (profile) {
+      const dbCount = window.supabaseActivities.filter(act => act.rep_id === profile.id).length;
+      if (dbCount > 0) return dbCount;
+    }
+  }
 
   let count = 0;
 
@@ -503,6 +957,160 @@ window.getEmployeeTouchpointsCount = function(empName) {
 
   return count;
 
+};
+
+// Global function to refresh active detail panel dynamically
+window.refreshActiveDetailPanel = function() {
+  const name = window.activeProfileName;
+  const type = window.activeProfileType;
+  if (!name) return;
+
+  const detailName = document.getElementById('detail-name');
+  const detailCategory = document.getElementById('detail-category-tag');
+  const detailAddress = document.getElementById('detail-address');
+  const detailPhone = document.getElementById('detail-phone');
+  const detailEmail = document.getElementById('detail-email');
+  const detailRep = document.getElementById('detail-rep-name');
+  const detailGlowDot = document.getElementById('detail-glow-dot');
+  const detailHealthScore = document.getElementById('detail-health-score');
+  const detailHealthFill = document.getElementById('detail-health-fill');
+  const detailCalls = document.getElementById('detail-calls-count');
+  const detailGifts = document.getElementById('detail-gifts-count');
+  const detailAiRec = document.getElementById('detail-ai-recommendation');
+  const detailTimelineList = document.getElementById('detail-timeline-list');
+  const localCallsCountVal = document.getElementById('detail-calls-count-val');
+  const touchesPerMonthVal = document.getElementById('detail-touches-per-month-val');
+  const statusTextVal = document.getElementById('detail-status-text-val');
+  if (detailName) detailName.textContent = name;
+  if (detailCategory) {
+    detailCategory.textContent = type.toUpperCase();
+    detailCategory.className = 'banner-tag';
+    if (type === 'employee') detailCategory.classList.add('info-tag');
+    else if (type === 'prospect') detailCategory.classList.add('alert-tag');
+  }
+
+  let address = '500 Logistics Way';
+  let phone = '(800) 555-0199';
+  let email = 'contact@whitebox.com';
+  let rep = 'Tom Collins';
+  let health = '84%';
+  let gifts = '1 dispatched';
+  let ai = 'Trigger Appreciations Box';
+  let statusDays = '0 Days Inactive';
+  let statusClass = 'green';
+
+  if (type === 'prospect') {
+    const item = (typeof prospectsData !== 'undefined' ? prospectsData : []).find(p => p.name === name);
+    if (item) {
+      address = item.streetAddress || address;
+      phone = item.phone || phone;
+      email = item.email || email;
+      rep = item.rep || rep;
+      health = `${item.health || 84}%`;
+      gifts = `${item.gifts || 1} dispatched`;
+      ai = item.aiRecommend || ai;
+      statusClass = getInactivityStatus(item.inactiveDays || 0);
+      statusDays = `${item.inactiveDays || 0} Days Inactive`;
+    }
+  } else if (type === 'customer') {
+    const item = (typeof customersData !== 'undefined' ? customersData : []).find(c => c.name === name);
+    if (item) {
+      address = item.streetAddress || address;
+      phone = item.phone || phone;
+      email = item.email || email;
+      rep = item.rep || rep;
+      health = `${item.health || 84}%`;
+      gifts = `${item.gifts || 1} dispatched`;
+      ai = item.aiRecommend || ai;
+      statusClass = getInactivityStatus(item.inactiveDays || 0);
+      statusDays = `${item.inactiveDays || 0} Days Inactive`;
+    }
+  } else if (type === 'employee') {
+    const liveList = typeof getLiveEmployeesList === 'function' ? getLiveEmployeesList() : [];
+    const item = liveList.find(e => e.name === name) || (typeof employeesData !== 'undefined' ? employeesData : []).find(e => e.name === name);
+    if (item) {
+      address = item.streetAddress || address;
+      phone = item.phone || phone;
+      email = item.email || email;
+      rep = item.manager || rep;
+      health = `${item.health || 84}%`;
+      gifts = `${item.gifts || 1} dispatched`;
+      ai = item.aiRecommend || ai;
+      statusClass = getInactivityStatus(item.inactiveDays || 0);
+      statusDays = `${item.inactiveDays || 0} Days Inactive`;
+    }
+  }
+
+  if (detailAddress) detailAddress.textContent = address;
+  if (detailPhone) detailPhone.textContent = phone;
+  if (detailEmail) detailEmail.textContent = email;
+  if (detailRep) detailRep.textContent = type === 'employee' ? `Primary Manager: ${rep}` : `Assigned Rep: ${rep}`;
+  if (detailGlowDot) detailGlowDot.className = `detail-glow-dot-large dot-${statusClass}`;
+  if (statusTextVal) {
+    statusTextVal.className = `kpi-value ${statusClass}-text`;
+    statusTextVal.textContent = statusDays.replace(/Inactive/gi, 'Ago');
+  }
+
+  const healthScoreInt = parseInt(health) || 90;
+  if (detailHealthScore) detailHealthScore.textContent = `${healthScoreInt}%`;
+  if (detailHealthFill) {
+    const strokeDashOffset = 251.2 * (1 - healthScoreInt / 100);
+    detailHealthFill.style.strokeDashoffset = strokeDashOffset;
+    if (healthScoreInt >= 80) detailHealthFill.style.stroke = '#10b981';
+    else if (healthScoreInt >= 60) detailHealthFill.style.stroke = '#f59e0b';
+    else detailHealthFill.style.stroke = '#ef4444';
+  }
+
+  const actualTouches = (type === 'employee') ? window.getEmployeeTouchpointsCount(name) : getClientHistory(name).length;
+  if (detailCalls) detailCalls.textContent = actualTouches;
+  if (localCallsCountVal) localCallsCountVal.textContent = actualTouches;
+  if (detailGifts) detailGifts.textContent = gifts;
+  if (detailAiRec) {
+    detailAiRec.textContent = ai;
+    if (statusClass === 'red') detailAiRec.style.color = '#ef4444';
+    else if (statusClass === 'orange') detailAiRec.style.color = '#f59e0b';
+    else detailAiRec.style.color = '#3b82f6';
+  }
+  if (touchesPerMonthVal) {
+    touchesPerMonthVal.textContent = (actualTouches / 3).toFixed(1) + ' / mo';
+  }
+
+  const timelineToggleContainer = document.getElementById('timeline-toggle-container');
+  const chronologicalTag = document.getElementById('timeline-chronological-tag');
+
+  if (detailTimelineList) {
+    if (type === 'employee') {
+      if (timelineToggleContainer) timelineToggleContainer.style.display = 'flex';
+      if (chronologicalTag) chronologicalTag.style.display = 'none';
+      if (!window.employeeTimelineTab) {
+        window.employeeTimelineTab = 'report';
+      }
+      const toggleReport = document.getElementById('timeline-toggle-report');
+      const toggleActivity = document.getElementById('timeline-toggle-activity');
+      if (toggleReport && toggleActivity) {
+        if (window.employeeTimelineTab === 'report') {
+          toggleReport.classList.add('active');
+          toggleReport.style.background = 'rgba(59, 130, 246, 0.15)';
+          toggleReport.style.color = '#3b82f6';
+          toggleActivity.classList.remove('active');
+          toggleActivity.style.background = 'transparent';
+          toggleActivity.style.color = '#64748b';
+        } else {
+          toggleActivity.classList.add('active');
+          toggleActivity.style.background = 'rgba(59, 130, 246, 0.15)';
+          toggleActivity.style.color = '#3b82f6';
+          toggleReport.classList.remove('active');
+          toggleReport.style.background = 'transparent';
+          toggleReport.style.color = '#64748b';
+        }
+      }
+    } else {
+      if (timelineToggleContainer) timelineToggleContainer.style.display = 'none';
+      if (chronologicalTag) chronologicalTag.style.display = 'inline-block';
+    }
+    renderTimeline(name);
+    renderDashboardGraph(name);
+  }
 };
 
 // Gifting Spend Ledger Report Modal — logic moved to inline <script> in dashboard.html for reliability
@@ -44907,8 +45515,6 @@ window.triggerB2BGiftingBuilder = function(targetName, milestoneName = '', dateS
     const role = window.currentRole || localStorage.getItem('whitebox_role') || 'owner';
     const username = window.currentUsername || localStorage.getItem('whitebox_username') || 'Tom Collins';
     if (role === 'rep') {
-    console.log('[renderUserProfile] Entering rep block. Finding elements...');
-    console.log('[renderUserProfile] nameEl:', !!nameEl, 'avatarEl:', !!avatarEl, 'roleEl:', !!roleEl, 'locEl:', !!locEl);
       senderInput.value = username;
     } else {
       senderInput.value = "Gregory Sterling (CEO)";
@@ -47902,343 +48508,44 @@ window.triggerB2BGiftingBuilder = function(targetName, milestoneName = '', dateS
 
 
       if (window.sendRelationshipToRecoveryBoard) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         window.sendRelationshipToRecoveryBoard(client);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       showDashboardToast(`✓ ${client} transferred to Board successfully!`, '✓');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      // Refresh tables to show updated board state if needed
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       if (typeof renderOverviewRegistry === 'function') renderOverviewRegistry();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       if (typeof renderCustomersList === 'function') renderCustomersList();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       if (typeof renderProspectsList === 'function') renderProspectsList();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      return;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   });
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 function updateTabPillBadges() {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const empBadge = document.getElementById('employees-total-count');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const custBadge = document.getElementById('customers-total-count');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const prospBadge = document.getElementById('prospects-total-count');
 
+  const role = window.currentRole || localStorage.getItem('whitebox_role') || 'owner';
+  const username = window.currentUsername || localStorage.getItem('whitebox_username') || 'Paul K.';
 
+  let scopedCust = customersData || [];
+  let scopedProsp = prospectsData || [];
 
+  if (role === 'rep') {
+    scopedCust = scopedCust.filter(c => c.rep === username);
+    scopedProsp = scopedProsp.filter(p => p.rep === username);
+  } else if (role === 'manager') {
+    const team = getTeamRoster(username);
+    scopedCust = scopedCust.filter(c => team.includes(c.rep));
+    scopedProsp = scopedProsp.filter(p => team.includes(p.rep));
+  }
 
+  if (typeof renderEmployeesList === 'function') {
+    renderEmployeesList();
+  } else {
+    const liveEmpCount = window.supabaseLeaderboardLive ? getLiveEmployeesList().length : employeesData.length;
+    if (empBadge) empBadge.textContent = liveEmpCount;
+  }
 
-
-
-
-
-
-
-
-
-
-
-  if (empBadge) empBadge.textContent = employeesData.length;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  if (custBadge) custBadge.textContent = customersData.length;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  if (prospBadge) prospBadge.textContent = prospectsData.length;
-
+  if (custBadge) custBadge.textContent = scopedCust.length;
+  if (prospBadge) prospBadge.textContent = scopedProsp.length;
 
 
 
@@ -51875,38 +52182,9 @@ function renderOverviewRegistry() {
 
 
     const inactivityStatus = getInactivityStatus(item.inactiveDays);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const dotColor = inactivityStatus === 'red' ? 'dot-red' : (inactivityStatus === 'orange' ? 'dot-orange' : 'dot-green');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const statusTextClass = inactivityStatus === 'red' ? 'red-text' : (inactivityStatus === 'orange' ? 'orange-text' : 'green-text');
+    const dotColor = item.inactiveDays === 999 ? 'dot-gray' : (inactivityStatus === 'red' ? 'dot-red' : (inactivityStatus === 'orange' ? 'dot-orange' : 'dot-green'));
+    const statusTextClass = item.inactiveDays === 999 ? 'gray-text' : (inactivityStatus === 'red' ? 'red-text' : (inactivityStatus === 'orange' ? 'orange-text' : 'green-text'));
+    const daysText = item.inactiveDays === 999 ? 'No activity yet' : `${item.inactiveDays} days ago`;
 
 
 
@@ -52818,7 +53096,7 @@ function renderOverviewRegistry() {
 
 
 
-            <span class="status-days ${statusTextClass}">${item.inactiveDays} days ago</span>
+            <span class="status-days ${statusTextClass}">${daysText}</span>
 
 
 
@@ -56323,120 +56601,115 @@ const clientGraphData = {
 
 
 function getClientHistory(name) {
+  const type = window.activeProfileType || 'customer';
+  let matchedActivities = [];
 
+  if (type === 'employee') {
+    const profile = (window.supabaseProfiles || []).find(p => p.name === name);
+    if (profile && window.supabaseActivities) {
+      matchedActivities = window.supabaseActivities.filter(act => act.rep_id === profile.id);
+    }
+  } else {
+    const db = (type.toLowerCase() === 'prospect') ? (prospectsData || []) : (customersData || []);
+    const record = db.find(c => c.name === name);
+    if (record && window.supabaseActivities) {
+      matchedActivities = window.supabaseActivities.filter(act => act.contact_id === record.id);
+    }
+  }
 
+  if (matchedActivities && matchedActivities.length > 0) {
+    const formatted = matchedActivities.map(act => {
+      const monthDays = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const d = new Date(act.logged_at);
+      const dateText = isNaN(d.getTime()) 
+        ? 'Jun 09' 
+        : (monthDays[d.getMonth()] + ' ' + String(d.getDate()).padStart(2, '0'));
 
+      let sector = 'customers';
+      if (!act.contact_id) {
+        sector = 'employees';
+      } else if (typeof prospectsData !== 'undefined' && prospectsData.some(p => p.id === act.contact_id)) {
+        sector = 'prospects';
+      }
 
+      let targetRecipient = name;
+      if (type === 'employee' && act.contact_id) {
+        const cRecord = (typeof customersData !== 'undefined' ? customersData : []).find(c => c.id === act.contact_id);
+        const pRecord = (typeof prospectsData !== 'undefined' ? prospectsData : []).find(p => p.id === act.contact_id);
+        if (cRecord) targetRecipient = cRecord.name;
+        else if (pRecord) targetRecipient = pRecord.name;
+      }
 
+      return {
+        type: act.type || 'Touchpoint',
+        date: dateText,
+        grade: act.grade || 'C',
+        notes: act.notes || '',
+        rep: act.profiles ? act.profiles.name : (act.rep_id === '8b1933c0-0f0e-4361-b472-3c8cfa2b9801' ? 'Paul K.' : 'System Automation'),
+        logged_at: act.logged_at,
+        contact_id: act.contact_id,
+        sector: sector,
+        recipient: targetRecipient
+      };
+    });
 
-
-
-
-
-
-
-
-
+    formatted.sort((a, b) => new Date(a.logged_at).getTime() - new Date(b.logged_at).getTime());
+    return formatted;
+  }
 
   if (!clientGraphData[name]) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     clientGraphData[name] = [
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { type: "Email", date: "Jan 15", grade: "A", count: 3, notes: "Introductory outreach campaign. Enthusiastic response.", rep: "System Automation" },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { type: "Call", date: "Feb 20", grade: "C", count: 2, notes: "Routine check-in. The client was busy but receptive.", rep: "Owner" },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { type: "System", date: "Mar 10", grade: "C", count: 1, notes: "Auto-newsletter catalog sent regarding seasonal boxes.", rep: "System Automation" },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { type: "Gift", date: "Apr 05", grade: "A", count: 3, notes: "Sent Sweets & Packs appreciation box. Positive feedback received.", rep: "Milestone Automation" },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { type: "Touchpoint", date: "May 12", grade: "A", count: 4, notes: "Detailed review of account. Highly satisfied with our custom logistics.", rep: "Owner" }
-
-
+      { type: "Email", date: "Jan 15", grade: "A", notes: "Introductory outreach campaign. Enthusiastic response.", rep: "System Automation" },
+      { type: "Call", date: "Feb 20", grade: "C", notes: "Routine check-in. The client was busy but receptive.", rep: "Owner" },
+      { type: "Note", date: "Mar 10", grade: "C", notes: "Auto-newsletter catalog sent regarding seasonal boxes.", rep: "System Automation" },
+      { type: "Gift", date: "Apr 05", grade: "A", notes: "Sent Sweets & Packs appreciation box. Positive feedback received.", rep: "Milestone Automation" },
+      { type: "Touchpoint", date: "May 12", grade: "A", notes: "Detailed review of account. Highly satisfied with our custom logistics.", rep: "Owner" }
+    ];
+  }
+  return clientGraphData[name];
+}
+
+function _unused_getClientHistory_old(name) {
+  const type = window.activeProfileType || 'customer';
+  let matchedActivities = [];
+
+  if (type === 'employee') {
+    const profile = (window.supabaseProfiles || []).find(p => p.name === name);
+    if (profile && window.supabaseActivities) {
+      matchedActivities = window.supabaseActivities.filter(act => act.rep_id === profile.id);
+    }
+  } else {
+    const db = (type.toLowerCase() === 'prospect') ? (prospectsData || []) : (customersData || []);
+    const record = db.find(c => c.name === name);
+    if (record && window.supabaseActivities) {
+      matchedActivities = window.supabaseActivities.filter(act => act.contact_id === record.id);
+    }
+  }
+
+  if (matchedActivities && matchedActivities.length > 0) {
+    const formatted = matchedActivities.map(act => {
+      const monthDays = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const d = new Date(act.logged_at);
+      const dateText = isNaN(d.getTime()) 
+        ? 'Jun 09' 
+        : (monthDays[d.getMonth()] + ' ' + String(d.getDate()).padStart(2, '0'));
+
+      return {
+        type: act.type || 'Touchpoint',
+        date: dateText,
+        grade: act.grade || 'C',
+        notes: act.notes || '',
+        rep: act.profiles ? act.profiles.name : (act.rep_id === '8b1933c0-0f0e-4361-b472-3c8cfa2b9801' ? 'Paul K.' : 'System Automation'),
+        logged_at: act.logged_at
+      };
+    });
+
+    formatted.sort((a, b) => new Date(a.logged_at).getTime() - new Date(b.logged_at).getTime());
+    return formatted;
+  }
+
+  if (!clientGraphData[name]) {
+    clientGraphData[name] = [
 
 
 
@@ -56593,6 +56866,200 @@ function renderTimeline(clientName) {
 
 
 
+
+  const type = window.activeProfileType || 'customer';
+  if (type === 'employee' && window.employeeTimelineTab === 'report') {
+    // Render the report card!
+    const myClients = (typeof customersData !== 'undefined' ? customersData : []).filter(c => c.rep === clientName);
+    const myProspects = (typeof prospectsData !== 'undefined' ? prospectsData : []).filter(p => p.rep === clientName);
+    const totalManaged = myClients.length + myProspects.length;
+
+    // Filter activities logged by this employee
+    const profile = (window.supabaseProfiles || []).find(p => p.name === clientName);
+    let myActivities = [];
+    if (profile && window.supabaseActivities) {
+      myActivities = window.supabaseActivities.filter(act => act.rep_id === profile.id);
+    }
+    const totalLogged = myActivities.length;
+
+    // Calculate Client Health Grade Profile from my activities
+    let gradeCounts = { A: 0, B: 0, C: 0, D: 0, F: 0 };
+    myActivities.forEach(act => {
+      const g = (act.grade || 'C').toUpperCase();
+      if (gradeCounts.hasOwnProperty(g)) {
+        gradeCounts[g]++;
+      } else {
+        gradeCounts['C']++;
+      }
+    });
+
+    // Calculate inactive clients/prospects (> 30 days) and urgent alerts (> 60 days or health < 60%)
+    let inactiveCount = 0;
+    let activeCount = 0;
+    let urgentAlerts = [];
+
+    // Let's loop through managed contacts
+    const allManaged = [...myClients.map(c => ({...c, type: 'customer'})), ...myProspects.map(p => ({...p, type: 'prospect'}))];
+    allManaged.forEach(contact => {
+      // Find activities for this contact
+      let contactActivities = [];
+      if (window.supabaseActivities) {
+        contactActivities = window.supabaseActivities.filter(act => act.contact_id === contact.id);
+      }
+      let days = contact.inactiveDays || 0;
+      if (contactActivities.length > 0) {
+        let mostRecent = null;
+        contactActivities.forEach(act => {
+          const actDate = new Date(act.logged_at);
+          if (!mostRecent || actDate > mostRecent) {
+            mostRecent = actDate;
+          }
+        });
+        if (mostRecent) {
+          days = Math.floor(Math.abs(new Date() - mostRecent) / (1000 * 60 * 60 * 24));
+        }
+      }
+
+      if (days > 30) {
+        inactiveCount++;
+      } else {
+        activeCount++;
+      }
+
+      const healthVal = parseInt(contact.health) || 84;
+      if (days > 60 || healthVal < 60) {
+        urgentAlerts.push({
+          name: contact.name,
+          type: contact.type,
+          inactiveDays: days,
+          health: healthVal,
+          rep: contact.rep
+        });
+      }
+    });
+
+    // Recent Gifts Sent (last 30 days)
+    let recentGiftsCount = 0;
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    myActivities.forEach(act => {
+      if ((act.type.includes('Gift') || act.type.includes('🎁')) && new Date(act.logged_at) >= thirtyDaysAgo) {
+        recentGiftsCount++;
+      }
+    });
+
+    // Touchpoint Velocity (touchpoints per client per month)
+    const velocity = totalManaged > 0 ? (totalLogged / totalManaged).toFixed(1) : '0.0';
+
+    // Let's construct a premium Report Card HTML interface
+    let reportHtml = `
+      <div class="report-card-container" style="padding: 16px; font-family: 'Outfit', sans-serif; display: flex; flex-direction: column; gap: 20px;">
+        
+        <!-- Metric Cards Grid -->
+        <div class="report-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px;">
+          
+          <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
+            <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Managed Accounts</span>
+            <span style="font-size: 22px; font-weight: 700; color: #f8fafc; font-family: 'Outfit';">${totalManaged}</span>
+            <span style="font-size: 10px; color: #94a3b8;">${myClients.length} Clients, ${myProspects.length} Prospects</span>
+          </div>
+
+          <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
+            <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Active Status</span>
+            <span style="font-size: 22px; font-weight: 700; color: #10b981; font-family: 'Outfit';">${activeCount} <span style="font-size: 14px; font-weight: 500; color: #64748b;">/ ${totalManaged}</span></span>
+            <span style="font-size: 10px; color: #94a3b8;">${inactiveCount} inactive (>30d)</span>
+          </div>
+
+          <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
+            <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Touchpoint Velocity</span>
+            <span style="font-size: 22px; font-weight: 700; color: #3b82f6; font-family: 'Outfit';">${velocity}</span>
+            <span style="font-size: 10px; color: #94a3b8;">Avg touches per account</span>
+          </div>
+
+          <div class="metric-card" style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 12px; display: flex; flex-direction: column; gap: 4px;">
+            <span style="font-size: 11px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Recent Gifts (30d)</span>
+            <span style="font-size: 22px; font-weight: 700; color: #a855f7; font-family: 'Outfit';">${recentGiftsCount}</span>
+            <span style="font-size: 10px; color: #94a3b8;">Total campaign rewards</span>
+          </div>
+
+        </div>
+
+        <!-- Grade Distribution Chart -->
+        <div style="background: rgba(255, 255, 255, 0.01); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 12px; padding: 16px;">
+          <h5 style="margin: 0 0 12px 0; font-size: 13px; color: #f8fafc; font-weight: 600; display: flex; align-items: center; gap: 6px;">
+            📊 Client Health Grade Profile
+          </h5>
+          <div style="display: flex; flex-direction: column; gap: 10px;">
+    `;
+
+    // Render bar chart for grade counts
+    const maxGradeCount = Math.max(...Object.values(gradeCounts), 1);
+    Object.entries(gradeCounts).forEach(([grade, count]) => {
+      const pct = (count / (totalLogged || 1)) * 100;
+      let barColor = '#3b82f6';
+      if (grade === 'A') barColor = '#10b981';
+      else if (grade === 'B') barColor = '#34d399';
+      else if (grade === 'C') barColor = '#f59e0b';
+      else if (grade === 'D') barColor = '#f97316';
+      else if (grade === 'F') barColor = '#ef4444';
+
+      reportHtml += `
+            <div style="display: flex; align-items: center; gap: 12px;">
+              <span style="font-size: 12px; font-weight: 700; color: #94a3b8; width: 12px;">${grade}</span>
+              <div style="flex: 1; height: 8px; background: rgba(255, 255, 255, 0.03); border-radius: 4px; overflow: hidden; position: relative;">
+                <div style="width: ${pct}%; height: 100%; background: ${barColor}; border-radius: 4px; transition: width 0.5s ease;"></div>
+              </div>
+              <span style="font-size: 11px; font-weight: 600; color: #cbd5e1; width: 30px; text-align: right;">${count} (${Math.round(pct)}%)</span>
+            </div>
+      `;
+    });
+
+    reportHtml += `
+          </div>
+        </div>
+
+        <!-- Urgent Alerts List -->
+        <div style="background: rgba(255, 255, 255, 0.01); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 12px; padding: 16px;">
+          <h5 style="margin: 0 0 12px 0; font-size: 13px; color: #f8fafc; font-weight: 600; display: flex; align-items: center; gap: 6px;">
+            ⚠️ Urgent Action Required
+            <span style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; font-size: 9px; padding: 2px 6px; border-radius: 9999px;">${urgentAlerts.length} Alerts</span>
+          </h5>
+          
+          <div style="display: flex; flex-direction: column; gap: 8px; max-height: 180px; overflow-y: auto; padding-right: 4px;">
+    `;
+
+    if (urgentAlerts.length === 0) {
+      reportHtml += `
+            <div style="text-align: center; padding: 20px; color: #64748b; font-size: 12px;">
+              ✨ All accounts are healthy and up to date!
+            </div>
+      `;
+    } else {
+      urgentAlerts.forEach(alert => {
+        reportHtml += `
+            <div style="display: flex; align-items: center; justify-content: space-between; background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 10px 12px; border-radius: 8px; gap: 8px;">
+              <div style="display: flex; flex-direction: column; gap: 2px;">
+                <span style="font-size: 12px; font-weight: 700; color: #f1f5f9;">${alert.name}</span>
+                <span style="font-size: 10px; color: #94a3b8; text-transform: capitalize;">${alert.type} • Inactivity: <span style="color: #ef4444; font-weight: 600;">${alert.inactiveDays} days</span></span>
+              </div>
+              <button onclick="if(typeof window.switchToProfile === 'function') { window.switchToProfile('${alert.name}', '${alert.type}') }" style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.2); color: #3b82f6; font-size: 10px; font-family: 'Outfit'; font-weight: 600; padding: 4px 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(59,130,246,0.2)'" onmouseout="this.style.background='rgba(59,130,246,0.1)'">
+                ⚡ View Contact
+              </button>
+            </div>
+        `;
+      });
+    }
+
+    reportHtml += `
+          </div>
+        </div>
+
+      </div>
+    `;
+
+    detailTimelineList.innerHTML = reportHtml;
+    return;
+  }
 
   const history = getClientHistory(clientName);
 
@@ -68811,1493 +69278,103 @@ function initDashboardLoggingModal() {
 
 
   if (btnSubmit) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     btnSubmit.addEventListener('click', (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       e.preventDefault();
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const clientSelect = document.getElementById('select-client');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const clientName = clientSelect ? clientSelect.value : 'Client';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const notesVal = document.getElementById('input-notes') ? document.getElementById('input-notes').value : '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const activityVal = selectType ? selectType.value : 'call';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const selectedGrade = modalSelectedGradeInput ? modalSelectedGradeInput.value : 'C';
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const isHighValue = ['call', 'meeting', 'personal-email', 'gift'].includes(activityVal);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      closeModal();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      // Clear form inputs
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (document.getElementById('input-notes')) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        document.getElementById('input-notes').value = '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      if (!notesVal.trim()) {
+        showDashboardToast('Please write some interaction notes first.', '⚠️');
+        return;
       }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      // Reset modal grade selector to default C
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (modalSelectedGradeInput) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        modalSelectedGradeInput.value = 'C';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const btns = modalGradeSelector.querySelectorAll('.grade-btn');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        btns.forEach(b => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          if (b.getAttribute('data-grade') === 'C') b.classList.add('active');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          else b.classList.remove('active');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (modalGradeFeedbackDesc) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          modalGradeFeedbackDesc.textContent = 'Grade C: Okay / Neutral Interaction';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          modalGradeFeedbackDesc.className = 'grade-feedback-desc text-orange';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      // Map frontend clientName to contact ID from customersData or prospectsData
+      const cleanName = clientName.toLowerCase().trim();
+      const dbItem = [...customersData, ...prospectsData].find(c => c.name.toLowerCase().trim() === cleanName);
+      const contactId = dbItem ? dbItem.id : null;
+
+      if (!contactId) {
+        showDashboardToast(`Could not resolve contact ID for ${clientName}`, '❌');
+        return;
       }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      // Trigger dynamic toast based on validation logic
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (isHighValue) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const gradeLabelsMap = {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          'A': 'A (Very Good) 🟢',
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          'C': 'C (Okay) 🟡',
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          'F': 'F (Very Bad) 🔴'
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        showDashboardToast(`Activity logged with Grade ${gradeLabelsMap[selectedGrade]}!`, '✓');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Dynamically update decay state across lists
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-        resetClientDecayToGreen(clientName);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Immediately resort the tables on the fly
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        sortAllRegistryTables();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Update database history and redraw graph
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const history = getClientHistory(clientName);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        let typeLabel = 'Call';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (activityVal === 'meeting') typeLabel = 'Meeting';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else if (activityVal === 'personal-email' || activityVal === 'email') typeLabel = 'Email';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else if (activityVal === 'lunch') typeLabel = 'Lunch';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else if (activityVal === 'gift') typeLabel = 'Gift';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const now = new Date();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const dateStr = months[now.getMonth()] + " " + String(now.getDate()).padStart(2, '0');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const lastPoint = history[history.length - 1];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (lastPoint && lastPoint.date === dateStr) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          lastPoint.count = (lastPoint.count || 1) + 1;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          lastPoint.grade = selectedGrade;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          lastPoint.notes = notesVal || lastPoint.notes;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        } else {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          history.push({
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            type: typeLabel,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            date: dateStr,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            grade: selectedGrade,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            count: 1,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            notes: notesVal || "Interaction logged via modal.",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            rep: "Owner"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          if (history.length > 5) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            history.shift();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      // Map activity types to capitalized DB types
+      let dbType = 'Call';
+      if (activityVal === 'meeting') dbType = 'Meeting';
+      else if (activityVal === 'personal-email' || activityVal === 'email') dbType = 'Email';
+      else if (activityVal === 'lunch') dbType = 'Lunch';
+      else if (activityVal === 'proposal') dbType = 'Proposal';
+      else if (activityVal === 'gift') dbType = 'Gift';
+
+      // Disable submit button
+      const submitBtn = document.getElementById('btn-submit-activity');
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Logging...';
+      }
+
+      (async () => {
+        try {
+          const { error: actErr } = await supabase
+            .from('activities')
+            .insert({
+              contact_id: contactId,
+              rep_id: window.activeUserId || '8b1933c0-0f0e-4361-b472-3c8cfa2b9801', // Fallback to Paul K
+              type: dbType,
+              grade: selectedGrade,
+              notes: notesVal.trim(),
+              workspace_id: window.activeWorkspaceId || 'd9b0a1a0-0000-0000-0000-000000000001'
+            });
+
+          if (actErr) {
+            console.error("[SUPABASE LOG ACTIVITY] Database insert failed:", actErr);
+            showDashboardToast(`Database Error: ${actErr.message || actErr.details || 'Check permission details.'}`, '❌');
+            return;
           }
 
+          showDashboardToast(`🎉 Activity logged successfully!`, '✓');
 
+          // Close modal and reset form inputs
+          closeModal();
 
+          if (document.getElementById('input-notes')) {
+            document.getElementById('input-notes').value = '';
+          }
+          if (modalSelectedGradeInput) {
+            modalSelectedGradeInput.value = 'C';
+            const btns = modalGradeSelector.querySelectorAll('.grade-btn');
+            btns.forEach(b => {
+              if (b.getAttribute('data-grade') === 'C') b.classList.add('active');
+              else b.classList.remove('active');
+            });
+            if (modalGradeFeedbackDesc) {
+              modalGradeFeedbackDesc.textContent = 'Grade C: Okay / Neutral Interaction';
+              modalGradeFeedbackDesc.className = 'grade-feedback-desc text-orange';
+            }
+          }
 
+          // Reload data
+          await fetchDashboardData();
 
-
-
-
-
-
-
-
-
-
-
+        } catch (ex) {
+          console.error("[SUPABASE LOG ACTIVITY] Exception during log:", ex);
+          showDashboardToast(`Error: ${ex.message || ex}`, '❌');
+        } finally {
+          if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Log Activity';
+          }
         }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const detailNameEl = document.getElementById('detail-name');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const activeName = detailNameEl ? detailNameEl.textContent.trim() : '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (activeName === clientName) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          renderTimeline(clientName);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          renderDashboardGraph(clientName);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      } else {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        showDashboardToast(`Activity logged in history (Aging decay unaffected)`, 'ℹ');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      })();
     });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// 5. Rep Nudging Interactions
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 function initDashboardNudges() {
@@ -72653,2614 +71730,148 @@ function initProfileClaimAndRepListeners() {
 
 
   const handleClaim = (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     e.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     e.stopPropagation();
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     const name = window.activeProfileName;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     const type = window.activeProfileType;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if (!name || type === 'employee') return;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     const db = (type === 'customer') ? customersData : prospectsData;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     const record = db.find(r => r.name === name);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if (!record) return;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     const oldRep = record.rep;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     const newRep = repSelect ? repSelect.value : oldRep;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     // 1. Enforce representative selection change
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if (newRep === oldRep) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       showDashboardToast("Please select a new representative first.", "⚠️");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       if (repSelect) repSelect.focus();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       return;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     // 2. Enforce transfer justification note
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     const noteEl = document.getElementById('claim-relationship-note');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     const noteText = noteEl ? noteEl.value.trim() : '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if (!noteText) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       showDashboardToast("Please enter a transfer justification note first.", "⚠️");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       if (noteEl) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         noteEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         noteEl.focus();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       return;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // 3. Reset decay state to healthy green
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    resetClientDecayToGreen(name);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // 4. Update rep in database
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    record.rep = newRep;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const detailRep = document.getElementById('detail-rep-name');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (detailRep) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      detailRep.textContent = `Assigned Rep: ${newRep}`;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    // 3. Enforce Owner Role Check (Triggers block non-owners)
+    if (window.activeUserRole !== 'owner') {
+      showDashboardToast("Access Denied: Reassignments for non-owners must go through Recovery Approval.", "❌");
+      return;
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // 5. Log chronological update entry in history timeline with the user's note
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (!clientGraphData[name]) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      getClientHistory(name);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    clientGraphData[name].push({
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      type: "System",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      date: "May 28",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      grade: "A",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      count: 1,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      notes: `Relationship claimed by Paul K. (CEO) and reassigned to ${newRep}. Note: ${noteText}`,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      rep: "Paul K. (CEO)"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    renderTimeline(name);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Clear note text area
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (noteEl) noteEl.value = '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // 6. Update elements in drawer UI and lock representative selection
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (window.recoveryBoardClients) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      window.recoveryBoardClients = window.recoveryBoardClients.filter(c => c.toLowerCase() !== name.toLowerCase());
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (repSelect) repSelect.style.display = 'none';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (detailRep) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      detailRep.style.display = 'inline-block';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      detailRep.textContent = `Assigned Rep: ${newRep}`;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const ctaPanel = document.getElementById('detail-claim-cta-panel');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (ctaPanel) ctaPanel.style.display = 'none';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (claimBtnTop) claimBtnTop.style.display = 'none';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const statusTextVal = document.getElementById('detail-status-text-val');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (statusTextVal) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      statusTextVal.className = 'kpi-value green-text';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      statusTextVal.textContent = '0 days ago';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const detailGlowDot = document.getElementById('detail-glow-dot');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (detailGlowDot) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      detailGlowDot.className = 'detail-glow-dot-large dot-green';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const detailHealthScore = document.getElementById('detail-health-score');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (detailHealthScore) detailHealthScore.textContent = '98%';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const detailHealthFill = document.getElementById('detail-health-fill');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (detailHealthFill) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      detailHealthFill.style.strokeDashoffset = 251.2 * (1 - 98 / 100);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      detailHealthFill.style.stroke = '#10b981';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // 7. Fade out and remove matching recovery card on the Recovery Board
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const cards = document.querySelectorAll('.recovery-opp-card');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    cards.forEach(card => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const title = card.querySelector('.opp-client-name');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (title && (title.textContent.trim().toLowerCase() === name.toLowerCase() || title.textContent.trim().toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(title.textContent.trim().toLowerCase()))) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        card.style.transition = 'all 0.5s cubic-bezier(0.16, 1, 0.3, 1)';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        card.style.opacity = '0';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        card.style.transform = 'translateY(15px) scale(0.95)';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        setTimeout(() => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          card.style.display = 'none';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          card.remove();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          // Update shared recovery count badge in sidebar
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          const badge = document.querySelector('.sidebar-nav-item[data-tab="recovery"] .nav-badge-alert');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          if (badge) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            const currentVal = parseInt(badge.textContent) || 0;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            if (currentVal > 1) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-              badge.textContent = currentVal - 1;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            } else {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-              badge.remove();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        }, 500);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    // Disable buttons
+    const claimBtnTop = document.getElementById('btn-claim-relationship');
+    const claimBtnBottom = document.getElementById('btn-claim-relationship-bottom');
+    const disableClaimBtns = (disabled) => {
+      if (claimBtnTop) claimBtnTop.disabled = disabled;
+      if (claimBtnBottom) claimBtnBottom.disabled = disabled;
+    };
+    disableClaimBtns(true);
+
+    (async () => {
+      try {
+        // Resolve Rep Profile ID
+        const cleanRepName = newRep.replace(/\s*\(.*\)/, '').trim();
+        const { data: repProf, error: repProfErr } = await supabase
+          .from('profiles')
+          .select('id')
+          .ilike('name', `%${cleanRepName}%`)
+          .limit(1);
+        if (repProfErr) {
+          console.error("[SUPABASE CLAIM] Rep resolve failed:", repProfErr);
+        }
+        const repId = repProf && repProf[0] ? repProf[0].id : null;
+
+        if (!repId) {
+          showDashboardToast(`Could not resolve profile for representative: ${newRep}`, '❌');
+          return;
+        }
+
+        if (!window.activeContactId) {
+          showDashboardToast(`No active contact ID found to reassign.`, '❌');
+          return;
+        }
+
+        // Update contacts table
+        const { error: updErr } = await supabase
+          .from('contacts')
+          .update({ assigned_rep_id: repId })
+          .eq('id', window.activeContactId);
+
+        if (updErr) {
+          console.error("[SUPABASE CLAIM] Contact reassignment failed:", updErr);
+          showDashboardToast(`Database Error: ${updErr.message || updErr.details || 'Check permissions.'}`, '❌');
+          return;
+        }
+
+        // Insert contact assignment history record
+        const { error: logErr } = await supabase
+          .from('contact_assignments')
+          .insert({
+            workspace_id: window.activeWorkspaceId || 'd9b0a1a0-0000-0000-0000-000000000001',
+            contact_id: window.activeContactId,
+            previous_rep_id: window.activeAssignedRepId,
+            new_rep_id: repId,
+            assigned_by: window.activeUserId,
+            justification: noteText
+          });
+
+        if (logErr) {
+          console.error("[SUPABASE CLAIM] History logging failed:", logErr);
+          // Non-fatal for the user, but log it
+        }
+
+        console.log("[SUPABASE CLAIM] Ownership reassigned successfully.");
+        showDashboardToast(`🎉 Relationship claimed! ${name} reassigned to ${newRep}.`, '✓');
+
+        // Clear note text area
+        if (noteEl) noteEl.value = '';
+
+        // Update elements in drawer UI and lock representative selection
+        if (window.recoveryBoardClients) {
+          window.recoveryBoardClients = window.recoveryBoardClients.filter(c => c.toLowerCase() !== name.toLowerCase());
+        }
+        if (repSelect) repSelect.style.display = 'none';
+        const detailRep = document.getElementById('detail-rep-name');
+        if (detailRep) {
+          detailRep.style.display = 'inline-block';
+          detailRep.textContent = `Assigned Rep: ${newRep}`;
+        }
+
+        const ctaPanel = document.getElementById('detail-claim-cta-panel');
+        if (ctaPanel) ctaPanel.style.display = 'none';
+        if (claimBtnTop) claimBtnTop.style.display = 'none';
+
+        const statusTextVal = document.getElementById('detail-status-text-val');
+        if (statusTextVal) {
+          statusTextVal.className = 'kpi-value green-text';
+          statusTextVal.textContent = '0 days ago';
+        }
+
+        // Reload data
+        await fetchDashboardData();
+
+      } catch (ex) {
+        console.error("[SUPABASE CLAIM] Exception during claim:", ex);
+        showDashboardToast(`Error: ${ex.message || ex}`, '❌');
+      } finally {
+        disableClaimBtns(false);
       }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // 8. Update Recovery Queue KPI Card (decrement at-risk neglect count)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const recoveryQueueCard = document.querySelector('.kpi-card.card-alert-red .kpi-value');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (recoveryQueueCard) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const count = parseInt(recoveryQueueCard.textContent) || 0;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (count > 0) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        recoveryQueueCard.textContent = count - 1;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // 9. Play Congratulations overlay animation in center of screen
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const congratsOverlay = document.getElementById('congrats-overlay');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const congratsMessage = document.getElementById('congrats-message');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const dismissBtn = document.getElementById('btn-congrats-dismiss');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (congratsOverlay && congratsMessage) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      congratsMessage.innerHTML = `Congratulations to representative <strong>${newRep}</strong> on securing and rescuing <strong>${name}</strong>!`;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      congratsOverlay.style.display = 'flex';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      setTimeout(() => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        congratsOverlay.style.opacity = '1';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const card = document.getElementById('congrats-card');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (card) card.style.transform = 'scale(1)';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      }, 50);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (dismissBtn) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        dismissBtn.onclick = (event) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          event.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          congratsOverlay.style.opacity = '0';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          const card = document.getElementById('congrats-card');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          if (card) card.style.transform = 'scale(0.8)';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          setTimeout(() => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            congratsOverlay.style.display = 'none';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          }, 400);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // 10. Refresh lists
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (typeof renderCustomersList === 'function') renderCustomersList();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (typeof renderProspectsList === 'function') renderProspectsList();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (typeof renderOverviewRegistry === 'function') renderOverviewRegistry();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (typeof sortAllRegistryTables === 'function') sortAllRegistryTables();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    showDashboardToast(`Relationship claimed! ${name} reassigned to ${newRep}.`, '✓');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    })();
   };
+
+
+
 
 
 
@@ -75349,1283 +71960,111 @@ function initProfileClaimAndRepListeners() {
 
 
 window.convertProspectToCustomer = function(name) {
-
-
-
-
-
-
-
   // Find prospect record in prospectsData
-
-
-
-
-
-
-
   const index = prospectsData.findIndex(p => p.name === name);
-
-
-
-
-
-
-
   if (index === -1) {
-
-
-
-
-
-
-
     showDashboardToast("Error: Prospect not found in database.", "⚠️");
-
-
-
-
-
-
-
     return;
-
-
-
-
-
-
-
   }
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
 
   const prospectRecord = prospectsData[index];
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  // 1. Remove from prospectsData
-
-
-
-
-
-
-
-  prospectsData.splice(index, 1);
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  // 2. Create new customer object
-
-
-
-
-
-
-
-  const newCustomer = {
-
-
-
-
-
-
-
-    name: prospectRecord.name,
-
-
-
-
-
-
-
-    initials: prospectRecord.initials || prospectRecord.name.substring(0, 2).toUpperCase(),
-
-
-
-
-
-
-
-    sector: prospectRecord.sector || 'B2B Sector',
-
-
-
-
-
-
-
-    rep: prospectRecord.rep || 'Unassigned',
-
-
-
-
-
-
-
-    prospects: 0,
-
-
-
-
-
-
-
-    customers: 1,
-
-
-
-
-
-
-
-    gifts: 0,
-
-
-
-
-
-
-
-    inactiveDays: 0,
-
-
-
-
-
-
-
-    health: 98,
-
-
-
-
-
-
-
-    colorClass: prospectRecord.colorClass || 'bg-blue',
-
-
-
-
-
-
-
-    streetAddress: prospectRecord.streetAddress || '123 Main St',
-
-
-
-
-
-
-
-    contact: prospectRecord.contact || 'Main Contact',
-
-
-
-
-
-
-
-    city: prospectRecord.city || 'Seattle',
-
-
-
-
-
-
-
-    province: prospectRecord.province || 'WA',
-
-
-
-
-
-
-
-    postal: prospectRecord.postal || '98101',
-
-
-
-
-
-
-
-    prospect: prospectRecord.prospect || '2026-01-01',
-
-
-
-
-
-
-
-    customer: new Date().toISOString().split('T')[0], // Today's date!
-
-
-
-
-
-
-
-    phone: prospectRecord.phone || '(206) 555-0100',
-
-
-
-
-
-
-
-    email: prospectRecord.email || 'info@client.com',
-
-
-
-
-
-
-
-    aiRecommend: "Send Sweet Box for reaching retention.", // Aligned confections trigger
-
-
-
-
-
-
-
-    category: "sme" // Default to B2B Customers catalog category
-
-
-
-
-
-
-
-  };
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  // 3. Push to customersData
-
-
-
-
-
-
-
-  customersData.push(newCustomer);
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  // 4. Update window active profile type
-
-
-
-
-
-
-
-  window.activeProfileType = 'customer';
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  // 5. Update DOM attributes
-
-
-
-
-
-
-
-  const detailCategory = document.getElementById('detail-category-tag');
-
-
-
-
-
-
-
-  if (detailCategory) {
-
-
-
-
-
-
-
-    detailCategory.textContent = 'Customer';
-
-
-
-
-
-
-
-    detailCategory.className = 'banner-tag'; // Normal customer tag styling
-
-
-
-
-
-
-
+  const orgId = prospectRecord.orgId;
+  if (!orgId) {
+    showDashboardToast("Error: Missing database Organization ID.", "⚠️");
+    return;
   }
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  // 6. Update drawer buttons
-
-
-
-
-
-
 
   const convertBtn = document.getElementById('btn-convert-relationship');
-
-
-
-
-
-
-
-  if (convertBtn) convertBtn.style.display = 'none';
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  const sendGiftBtn = document.getElementById('btn-send-client-gift');
-
-
-
-
-
-
-
-  if (sendGiftBtn) sendGiftBtn.style.display = 'inline-block';
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  // 7. Update health display and timers in detail view
-
-
-
-
-
-
-
-  const detailGlowDot = document.getElementById('detail-glow-dot');
-
-
-
-
-
-
-
-  if (detailGlowDot) {
-
-
-
-
-
-
-
-    detailGlowDot.className = 'detail-glow-dot-large dot-green';
-
-
-
-
-
-
-
+  if (convertBtn) {
+    convertBtn.disabled = true;
+    convertBtn.textContent = 'Converting...';
   }
 
-
-
-
-
-
-
-  const detailHealthScore = document.getElementById('detail-health-score');
-
-
-
-
-
-
-
-  if (detailHealthScore) detailHealthScore.textContent = '98%';
-
-
-
-
-
-
-
-  const detailHealthFill = document.getElementById('detail-health-fill');
-
-
-
-
-
-
-
-  if (detailHealthFill) {
-
-
-
-
-
-
-
-    detailHealthFill.style.strokeDashoffset = 251.2 * (1 - 98 / 100);
-
-
-
-
-
-
-
-    detailHealthFill.style.stroke = '#10b981';
-
-
-
-
-
-
-
-  }
-
-
-
-
-
-
-
-  const statusTextVal = document.getElementById('detail-status-text-val');
-
-
-
-
-
-
-
-  if (statusTextVal) {
-
-
-
-
-
-
-
-    statusTextVal.className = 'kpi-value green-text';
-
-
-
-
-
-
-
-    statusTextVal.textContent = '0 days ago';
-
-
-
-
-
-
-
-  }
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  // 8. Log update history timeline entry
-
-
-
-
-
-
-
-  if (!clientGraphData[name]) {
-
-
-
-
-
-
-
-    clientGraphData[name] = [];
-
-
-
-
-
-
-
-  }
-
-
-
-
-
-
-
-  clientGraphData[name].push({
-
-
-
-
-
-
-
-    type: "System",
-
-
-
-
-
-
-
-    date: "May 28",
-
-
-
-
-
-
-
-    grade: "A",
-
-
-
-
-
-
-
-    count: 1,
-
-
-
-
-
-
-
-    notes: `Relationship converted from B2B Prospect to active B2B Customer by Paul K. (CEO). Aligned celebration confections trigger activated.`,
-
-
-
-
-
-
-
-    rep: prospectRecord.rep
-
-
-
-
-
-
-
-  });
-
-
-
-
-
-
-
-  renderTimeline(name);
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  // 9. Re-render all dashboard grids/registers
-
-
-
-
-
-
-
-  if (typeof renderCustomersList === 'function') renderCustomersList();
-
-
-
-
-
-
-
-  if (typeof renderProspectsList === 'function') renderProspectsList();
-
-
-
-
-
-
-
-  if (typeof renderOverviewRegistry === 'function') renderOverviewRegistry();
-
-
-
-
-
-
-
-  if (typeof sortAllRegistryTables === 'function') sortAllRegistryTables();
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  // 10. Play cinematic fullscreen congratulations overlay
-
-
-
-
-
-
-
-  const congratsOverlay = document.getElementById('convert-congrats-overlay');
-
-
-
-
-
-
-
-  const congratsMessage = document.getElementById('convert-congrats-message');
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  if (congratsOverlay && congratsMessage) {
-
-
-
-
-
-
-
-    congratsMessage.innerHTML = `Congratulations to representative <strong>${prospectRecord.rep}</strong> on converting <strong>${name}</strong> into an active B2B Customer!`;
-
-
-
-
-
-
-
-    congratsOverlay.style.display = 'flex';
-
-
-
-
-
-
-
-    setTimeout(() => {
-
-
-
-
-
-
-
-      congratsOverlay.style.opacity = '1';
-
-
-
-
-
-
-
-      const card = document.getElementById('convert-congrats-card');
-
-
-
-
-
-
-
-      if (card) card.style.transform = 'scale(1)';
-
-
-
-
-
-
-
-    }, 50);
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-    // Bind overlay controls
-
-
-
-
-
-
-
-    const dismissBtn = document.getElementById('btn-convert-dismiss');
-
-
-
-
-
-
-
-    if (dismissBtn) {
-
-
-
-
-
-
-
-      dismissBtn.onclick = (e) => {
-
-
-
-
-
-
-
-        e.preventDefault();
-
-
-
-
-
-
-
-        congratsOverlay.style.opacity = '0';
-
-
-
-
-
-
-
-        const card = document.getElementById('convert-congrats-card');
-
-
-
-
-
-
-
-        if (card) card.style.transform = 'scale(0.8)';
-
-
-
-
-
-
-
+  (async () => {
+    try {
+      // 1. Update organization category to 'smb'
+      const { error: updErr } = await supabase
+        .from('organizations')
+        .update({ category: 'smb' })
+        .eq('id', orgId);
+
+      if (updErr) {
+        console.error("[SUPABASE CONVERT PROSPECT] Database update failed:", updErr);
+        showDashboardToast(`Database Error: ${updErr.message || updErr.details || 'Check permission details.'}`, '❌');
+        return;
+      }
+
+      console.log("[SUPABASE CONVERT PROSPECT] Successfully updated category in database.");
+      showDashboardToast(`🎉 Prospect converted to Customer!`, '✓');
+
+      // 2. Play cinematic fullscreen congratulations overlay (local demo overlay)
+      const congratsOverlay = document.getElementById('convert-congrats-overlay');
+      const congratsMessage = document.getElementById('convert-congrats-message');
+
+      if (congratsOverlay && congratsMessage) {
+        congratsMessage.innerHTML = `Congratulations to representative <strong>${prospectRecord.rep || 'Representative'}</strong> on converting <strong>${name}</strong> into an active B2B Customer!`;
+        congratsOverlay.style.display = 'flex';
         setTimeout(() => {
+          congratsOverlay.style.opacity = '1';
+          const card = document.getElementById('convert-congrats-card');
+          if (card) card.style.transform = 'scale(1)';
+        }, 50);
 
+        // Bind overlay controls
+        const dismissBtn = document.getElementById('btn-convert-dismiss');
+        if (dismissBtn) {
+          dismissBtn.onclick = (e) => {
+            e.preventDefault();
+            congratsOverlay.style.opacity = '0';
+            const card = document.getElementById('convert-congrats-card');
+            if (card) card.style.transform = 'scale(0.8)';
+            setTimeout(() => {
+              congratsOverlay.style.display = 'none';
+            }, 400);
+          };
+        }
 
+        const celebrateGiftBtn = document.getElementById('btn-convert-send-gift');
+        if (celebrateGiftBtn) {
+          celebrateGiftBtn.onclick = (e) => {
+            e.preventDefault();
+            congratsOverlay.style.opacity = '0';
+            const card = document.getElementById('convert-congrats-card');
+            if (card) card.style.transform = 'scale(0.8)';
+            setTimeout(() => {
+              congratsOverlay.style.display = 'none';
+              if (typeof window.openGiftingModalFor === 'function') {
+                window.openGiftingModalFor(name);
+              }
+            }, 400);
+          };
+        }
+      }
 
+      // 3. Reload dashboard data
+      await fetchDashboardData();
 
+      // Clear the details active type and close detail view
+      const detailCategory = document.getElementById('detail-category-tag');
+      if (detailCategory) {
+        detailCategory.textContent = 'Customer';
+        detailCategory.className = 'banner-tag';
+      }
+      if (convertBtn) convertBtn.style.display = 'none';
+      const sendGiftBtn = document.getElementById('btn-send-client-gift');
+      if (sendGiftBtn) sendGiftBtn.style.display = 'inline-block';
 
-
-
-          congratsOverlay.style.display = 'none';
-
-
-
-
-
-
-
-        }, 400);
-
-
-
-
-
-
-
-      };
-
-
-
-
-
-
-
+    } catch (ex) {
+      console.error("[SUPABASE CONVERT PROSPECT] Exception during conversion:", ex);
+      showDashboardToast(`Error: ${ex.message || ex}`, '❌');
+    } finally {
+      if (convertBtn) {
+        convertBtn.disabled = false;
+        convertBtn.textContent = 'Convert to Customer';
+      }
     }
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-    const celebrateGiftBtn = document.getElementById('btn-convert-send-gift');
-
-
-
-
-
-
-
-    if (celebrateGiftBtn) {
-
-
-
-
-
-
-
-      celebrateGiftBtn.onclick = (e) => {
-
-
-
-
-
-
-
-        e.preventDefault();
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-        // A. Fade out overlay
-
-
-
-
-
-
-
-        congratsOverlay.style.opacity = '0';
-
-
-
-
-
-
-
-        const card = document.getElementById('convert-congrats-card');
-
-
-
-
-
-
-
-        if (card) card.style.transform = 'scale(0.8)';
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-        setTimeout(() => {
-
-
-
-
-
-
-
-          congratsOverlay.style.display = 'none';
-
-
-
-
-
-
-
-          
-
-
-
-
-
-
-
-          // B. Direct open Gifting Modal for this newly converted customer!
-
-
-
-
-
-
-
-          if (typeof window.openGiftingModalFor === 'function') {
-
-
-
-
-
-
-
-            window.openGiftingModalFor(name);
-
-
-
-
-
-
-
-          }
-
-
-
-
-
-
-
-        }, 400);
-
-
-
-
-
-
-
-      };
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-  }
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-  showDashboardToast(`Conversion successful! ${name} is now a customer.`, '🚀');
-
-
-
-
-
-
-
+  })();
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// 7. Gifting Approvals & Milestone Dispatches
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// 7. Gifting Approvals & Milestone Dispatches
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// 7. Gifting Approvals & Milestone Dispatches
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// 7. Gifting Approvals & Milestone Dispatches
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// 7. Gifting Approvals & Milestone Dispatches
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 function initDashboardGiftingApprovals() {
@@ -101316,9 +96755,10 @@ function updateLeaderboardTabsForRole(role) {
   if (role === 'owner') {
     // Hide 'My Team'
     myTeamBtn.style.display = 'none';
-    // If 'My Team' was active, switch to 'Teams'
-    if (myTeamBtn.classList.contains('active')) {
-      myTeamBtn.classList.remove('active');
+    // Ensure one of the other buttons is active
+    const activeBtn = document.querySelector('#leaderboard-switch-tabs-emp .switch-tab-btn.active');
+    if (!activeBtn || activeBtn === myTeamBtn) {
+      if (activeBtn) activeBtn.classList.remove('active');
       allTeamsBtn.classList.add('active');
       try { renderEmployeesSubLeaderboard(); } catch(e) {}
     }
@@ -101343,7 +96783,7 @@ function updateEmployeesTabLabel(role) {
     if (svg) {
       empItem.appendChild(svg);
     }
-    const labelText = (role === 'rep' || role === 'manager') ? '\n\n\n\n                    Team\n\n\n\n' : '\n\n\n\n                    Employees\n\n\n\n';
+    const labelText = (role === 'rep' || role === 'manager') ? '\n                    Team\n' : '\n                    Employees\n';
     empItem.appendChild(document.createTextNode(labelText));
   }
 
@@ -101599,42 +97039,35 @@ function updateGiftingSpendDashboard() {
   const role = window.currentRole || localStorage.getItem('whitebox_role') || 'owner';
   const username = window.currentUsername || localStorage.getItem('whitebox_username') || 'Tom Collins';
   
-  let totalGifts = 0;
-  let totalSpend = 0.0;
-  
-  if (role === 'rep' || role === 'manager') {
-    if (typeof customersData !== 'undefined') {
-      customersData.forEach(c => {
-        if (c.rep === username) {
-          totalGifts += c.gifts || 0;
-          totalSpend += (c.gifts || 0) * 54.20;
-        }
-      });
-    }
-    if (typeof prospectsData !== 'undefined') {
-      prospectsData.forEach(p => {
-        if (p.rep === username) {
-          totalGifts += p.gifts || 0;
-          totalSpend += (p.gifts || 0) * 54.20;
-        }
-      });
-    }
-    totalGifts += 3;
-    totalSpend += 180 + 300 + 90;
-  } else {
-    totalGifts = 142;
-    totalSpend = 4850.00;
-  }
-  
   const giftsSentEl = document.getElementById('kpi-gifts-sent-count');
   const giftsSpendEl = document.getElementById('kpi-gifts-spend-value');
   const budgetPercentageEl = document.getElementById('kpi-budget-percentage');
   const budgetDescEl = document.getElementById('kpi-budget-allocation-desc');
   
+  const budgetCap = (role === 'rep' || role === 'manager') ? 2500 : 10000;
+
+  if (window.supabaseLoading) {
+    if (giftsSentEl) giftsSentEl.textContent = '...';
+    if (giftsSpendEl) giftsSpendEl.textContent = '...';
+    if (budgetPercentageEl) budgetPercentageEl.textContent = '...';
+    if (budgetDescEl) budgetDescEl.textContent = `Spent ... of $${budgetCap.toLocaleString('en-US')} allocated Q2 budget`;
+    return;
+  }
+  
+  if (window.supabaseError || !window.supabaseKPIs) {
+    if (giftsSentEl) giftsSentEl.textContent = '—';
+    if (giftsSpendEl) giftsSpendEl.textContent = '—';
+    if (budgetPercentageEl) budgetPercentageEl.textContent = '—';
+    if (budgetDescEl) budgetDescEl.textContent = `Spent — of $${budgetCap.toLocaleString('en-US')} allocated Q2 budget`;
+    return;
+  }
+  
+  const totalGifts = window.supabaseKPIs.deliveredCount;
+  const totalSpend = window.supabaseKPIs.deliveredSpend;
+  
   if (giftsSentEl) giftsSentEl.textContent = totalGifts;
   if (giftsSpendEl) giftsSpendEl.textContent = `$${totalSpend.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   
-  const budgetCap = (role === 'rep' || role === 'manager') ? 2500 : 10000;
   const pct = (totalSpend / budgetCap) * 100;
   
   if (budgetPercentageEl) budgetPercentageEl.textContent = `${pct.toFixed(1)}%`;
@@ -101738,11 +97171,25 @@ window.updateConstellationVisibility = function(role) {
   });
 };
 
-function initDashboardRoleSelector() {
+async function initDashboardRoleSelector() {
   const savedRole = localStorage.getItem('whitebox_role') || 'owner';
   const savedName = localStorage.getItem('whitebox_username') || 'Paul K.';
   window.currentRole = savedRole;
   window.currentUsername = savedName;
+
+  // Sync Supabase Auth session & Fetch live data on startup asynchronously so it never blocks UI rendering
+  (async () => {
+    try {
+      await syncSupabaseSession(savedName, savedRole);
+    } catch (err) {
+      console.error("[SUPABASE AUTH] auth failure (startup sync):", err);
+    }
+    try {
+      await fetchDashboardData();
+    } catch (err) {
+      console.error("[SUPABASE DATA] fetch failure (startup data):", err);
+    }
+  })();
   try {
     if (typeof window.renderRegistryAlertHub === 'function') window.renderRegistryAlertHub(savedRole);
   } catch(e) {}
@@ -101812,6 +97259,19 @@ function initDashboardRoleSelector() {
   try {
     window.updateConstellationVisibility(savedRole);
   } catch(e) {}
+
+  // Ensure loading state is removed immediately after initial synchronous rendering
+  const loadingOverlay = document.getElementById('loading');
+  if (loadingOverlay) {
+    console.log("[LOADING] Removing loading overlay state...");
+    loadingOverlay.classList.add('fade-out');
+    setTimeout(() => {
+      loadingOverlay.style.display = 'none';
+      console.log("[LOADING] loading state removed.");
+    }, 500);
+  } else {
+    console.log("[LOADING] loading state removed (no loading overlay element found in DOM).");
+  }
 
   const trigger = document.getElementById('role-selector-trigger');
   const dropdown = document.getElementById('role-dropdown-list');
@@ -102160,7 +97620,7 @@ function initDashboardRoleSelector() {
 
 
 
-    opt.addEventListener('click', (e) => {
+    opt.addEventListener('click', async (e) => {
 
 
 
@@ -102239,6 +97699,20 @@ function initDashboardRoleSelector() {
         localStorage.setItem('whitebox_role', role);
         localStorage.setItem('whitebox_username', window.currentUsername);
       }
+
+      // Sync Supabase session and fetch data for the new role asynchronously so it never blocks UI rendering
+      (async () => {
+        try {
+          await syncSupabaseSession(window.currentUsername, role);
+        } catch (err) {
+          console.error("[SUPABASE AUTH] auth failure (role switch sync):", err);
+        }
+        try {
+          await fetchDashboardData();
+        } catch (err) {
+          console.error("[SUPABASE DATA] fetch failure (role switch data):", err);
+        }
+      })();
 
       // Clear and reset search inputs and states on role switch to prevent cross-profile leakage
       try {
@@ -105265,6 +100739,9 @@ function initRelationshipDetailView() {
 
 
     node.addEventListener('click', (e) => {
+      if (typeof window.cancelContactEdit === 'function') {
+        window.cancelContactEdit();
+      }
 
 
 
@@ -105345,6 +100822,15 @@ function initRelationshipDetailView() {
 
 
       const type = node.getAttribute('data-type') || 'Customer';
+      const editContactBtn = document.getElementById('btn-edit-contact');
+      if (editContactBtn) {
+        const lowerType = type.toLowerCase();
+        if (lowerType === 'customer' || lowerType === 'prospect') {
+          editContactBtn.style.display = 'inline-block';
+        } else {
+          editContactBtn.style.display = 'none';
+        }
+      }
 
 
 
@@ -107037,7 +102523,7 @@ function initRelationshipDetailView() {
 
 
 
-        if (isOnBoard && type !== 'employee') {
+        if (isOnBoard && type !== 'employee' && (window.currentRole === 'owner' || window.activeUserRole === 'owner')) {
 
 
 
@@ -108970,6 +104456,9 @@ function initRelationshipDetailView() {
 
 
     backBtn.addEventListener('click', () => {
+      if (typeof window.cancelContactEdit === 'function') {
+        window.cancelContactEdit();
+      }
 
 
 
@@ -109802,2351 +105291,252 @@ function initRelationshipDetailView() {
 
 
   if (btnSubmitDetailLog && detailNotesInput) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     btnSubmitDetailLog.addEventListener('click', (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       e.preventDefault();
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const notes = detailNotesInput.value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       if (!notes) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        showDashboardToast('Please write some interaction notes first.', '×');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        showDashboardToast('Please write some interaction notes first.', '⚠️');
         return;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
       const activityVal = detailLogActivityType.value;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const isHighValue = ['call', 'email', 'proposal', 'meeting', 'gift'].includes(activityVal);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const name = detailName ? detailName.textContent.trim() : 'Client';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      let typeLabel = 'Phone Call';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (activityVal === 'meeting') typeLabel = 'Meeting';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      else if (activityVal === 'email') typeLabel = 'Email';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      else if (activityVal === 'proposal') typeLabel = 'Proposal/Quote';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      else if (activityVal === 'gift') typeLabel = 'Gift';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const selectedGrade = detailSelectedGradeInput ? detailSelectedGradeInput.value : 'C';
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      // Append activity to database and re-render
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const now = new Date();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const dateStr = months[now.getMonth()] + " " + String(now.getDate()).padStart(2, '0');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const history = getClientHistory(name);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const lastPoint = history[history.length - 1];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (lastPoint && lastPoint.date === dateStr) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        lastPoint.count = (lastPoint.count || 1) + 1;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        lastPoint.grade = selectedGrade;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        lastPoint.notes = notes || lastPoint.notes;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      } else {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        history.push({
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          type: typeLabel.split(' ')[0],
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          date: dateStr,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          grade: selectedGrade,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          count: 1,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          notes: notes,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          rep: "Owner"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (history.length > 5) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          history.shift();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      // Map activity types to capitalized DB types
+      let dbType = 'Call';
+      if (activityVal === 'meeting') dbType = 'Meeting';
+      else if (activityVal === 'email') dbType = 'Email';
+      else if (activityVal === 'proposal') dbType = 'Proposal';
+      else if (activityVal === 'gift') dbType = 'Gift';
+
+      if (!window.activeContactId && window.activeProfileType !== 'employee') {
+        showDashboardToast('No active contact ID found to log activity.', '❌');
+        return;
       }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      renderTimeline(name);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      renderDashboardGraph(name);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      // Clear textarea
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      detailNotesInput.value = '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      // Reset Detail Grade selector buttons back to default C
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (detailSelectedGradeInput) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        detailSelectedGradeInput.value = 'C';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const btns = detailGradeSelector.querySelectorAll('.grade-btn');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        btns.forEach(b => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          if (b.getAttribute('data-grade') === 'C') b.classList.add('active');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          else b.classList.remove('active');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (detailGradeFeedbackDesc) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          detailGradeFeedbackDesc.textContent = 'Grade C: Okay / Neutral Interaction';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          detailGradeFeedbackDesc.className = 'grade-feedback-desc text-orange';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      // Disable submit button
+      const submitBtn = document.getElementById('btn-submit-detail-activity');
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Logging...';
       }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      // Timer reset dynamic flows
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (isHighValue) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const gradeLabelsMap = {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          'A': 'A (Very Good) 🟢',
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          'C': 'C (Okay) 🟡',
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          'F': 'F (Very Bad) 🔴'
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        showDashboardToast(`Direct touchpoint logged with Grade ${gradeLabelsMap[selectedGrade]}!`, '✓');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Reset Top 4 KPI Cards
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const statusTextVal = document.getElementById('detail-status-text-val');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (statusTextVal) {
-
-          statusTextVal.className = 'kpi-value green-text';
-
-          statusTextVal.textContent = '0 days ago';
-
-          if (detailGlowDot) detailGlowDot.className = 'detail-glow-dot-large dot-green';
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const callsCountVal = document.getElementById('detail-calls-count-val');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (callsCountVal) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          const currentText = callsCountVal.textContent;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          const currentNum = parseInt(currentText) || 0;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          callsCountVal.textContent = currentNum + 1;
-
-        const detailCalls = document.getElementById('detail-calls-count');
-
-        if (detailCalls) detailCalls.textContent = currentNum + 1;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          // Recalculate dynamic Touches / Month
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          const touchesPerMonthVal = document.getElementById('detail-touches-per-month-val');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          if (touchesPerMonthVal) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            touchesPerMonthVal.textContent = ((currentNum + 1) / 3).toFixed(1) + ' / mo';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      (async () => {
+        try {
+          let targetRepId = window.activeUserId || '8b1933c0-0f0e-4361-b472-3c8cfa2b9801';
+          let insertContactId = window.activeContactId;
+          let finalNotes = notes;
+
+          if (window.activeProfileType === 'employee') {
+            insertContactId = null;
+            const profile = (window.supabaseProfiles || []).find(p => p.name === window.activeProfileName);
+            if (profile) {
+              targetRepId = profile.id;
+            }
+            const loggedInUserName = window.currentUsername || localStorage.getItem('whitebox_username') || 'Paul K.';
+            if (loggedInUserName !== window.activeProfileName) {
+              finalNotes = `[Logged by ${loggedInUserName}]: ${notes}`;
+            }
           }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Dynamic health scores
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (detailHealthScore) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          if (selectedGrade === 'A') detailHealthScore.textContent = '98%';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          else if (selectedGrade === 'F') detailHealthScore.textContent = '38%';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          else detailHealthScore.textContent = '74%';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (detailHealthFill) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          if (selectedGrade === 'A') {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            detailHealthFill.style.strokeDashoffset = '5.0';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            detailHealthFill.style.stroke = '#10b981';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          } else if (selectedGrade === 'F') {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            detailHealthFill.style.strokeDashoffset = '155.7';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            detailHealthFill.style.stroke = '#ef4444';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          } else {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            detailHealthFill.style.strokeDashoffset = '65.3';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            detailHealthFill.style.stroke = '#f59e0b';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+          const { error: actErr } = await supabase
+            .from('activities')
+            .insert({
+              contact_id: insertContactId,
+              rep_id: targetRepId,
+              type: dbType,
+              grade: selectedGrade,
+              notes: finalNotes,
+              workspace_id: window.activeWorkspaceId || 'd9b0a1a0-0000-0000-0000-000000000001'
+            });
+
+          if (actErr) {
+            console.error("[SUPABASE DETAIL LOG] Database insert failed:", actErr);
+            showDashboardToast(`Database Error: ${actErr.message || actErr.details || 'Check RLS permissions.'}`, '❌');
+            return;
           }
 
+          showDashboardToast(`🎉 Activity logged successfully!`, '✓');
 
+          // Clear notes input textarea
+          detailNotesInput.value = '';
 
+          // Reset grade buttons
+          if (detailSelectedGradeInput) {
+            detailSelectedGradeInput.value = 'C';
+            const btns = detailGradeSelector.querySelectorAll('.grade-btn');
+            btns.forEach(b => {
+              if (b.getAttribute('data-grade') === 'C') b.classList.add('active');
+              else b.classList.remove('active');
+            });
+            if (detailGradeFeedbackDesc) {
+              detailGradeFeedbackDesc.textContent = 'Grade C: Okay / Neutral Interaction';
+              detailGradeFeedbackDesc.className = 'grade-feedback-desc text-orange';
+            }
+          }
 
+          // Reload data
+          await fetchDashboardData();
 
+          // Refresh the panel UI
+          if (typeof window.refreshActiveDetailPanel === 'function') {
+            window.refreshActiveDetailPanel();
+          }
 
-
-
-
-
-
-
-
-
-
+        } catch (ex) {
+          console.error("[SUPABASE DETAIL LOG] Exception during log:", ex);
+          showDashboardToast(`Error: ${ex.message || ex}`, '❌');
+        } finally {
+          if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Log Touchpoint';
+          }
         }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Update stats items in detail view
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (detailCalls) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          const currentText = detailCalls.textContent;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          const currentNum = parseInt(currentText) || 0;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          if (detailCalls) detailCalls.textContent = currentNum + 1;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Dynamically update decay state across lists
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (selectedGrade === 'A') {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          resetClientDecayToGreen(name);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        } else if (selectedGrade === 'F') {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          triggerClientDecayToRed(name);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          showDashboardToast(`Warning: ${name} is marked as high churn risk!`, '⚠');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        } else {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          resetClientDecayToOrange(name);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Immediately resort the tables on the fly
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        sortAllRegistryTables();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Decrement neglected alert KPIs
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const neglectedCard = document.querySelector('.kpi-card.card-alert-red .kpi-value');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (neglectedCard) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          const val = parseInt(neglectedCard.textContent) || 0;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          if (val > 0) neglectedCard.textContent = val - 1;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      } else {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        showDashboardToast(`Touchpoint logged (Inactivity decay timer unaffected)`, 'ℹ');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      })();
     });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   }
 
+  // Register contact editing listeners and handlers
+  window.cancelContactEdit = function() {
+    if (window.isEditingContact) {
+      const detailContactTag = document.getElementById('detail-contact-tag');
+      const detailEmail = document.getElementById('detail-email');
+      const detailPhone = document.getElementById('detail-phone');
+      const detailAiRec = document.getElementById('detail-ai-recommendation');
+      if (detailContactTag && detailEmail && detailPhone && detailAiRec && window.originalContactValues) {
+        detailContactTag.textContent = window.originalContactValues.name;
+        detailEmail.textContent = window.originalContactValues.email;
+        detailPhone.textContent = window.originalContactValues.phone;
+        detailAiRec.textContent = window.originalContactValues.ai_recommendation;
+      }
+    }
+    window.isEditingContact = false;
+    const editContactBtn = document.getElementById('btn-edit-contact');
+    if (editContactBtn) {
+      editContactBtn.innerHTML = '✏️ Edit Contact';
+      editContactBtn.style.background = 'linear-gradient(135deg, #a855f7 0%, #6366f1 100%)';
+      editContactBtn.style.boxShadow = '0 4px 10px rgba(168, 85, 247, 0.25)';
+      editContactBtn.disabled = false;
+    }
+  };
 
+  window.initContactEditing = function() {
+    const editContactBtn = document.getElementById('btn-edit-contact');
+    if (!editContactBtn) return;
 
+    // Remove old listener if any to avoid duplication
+    const newBtn = editContactBtn.cloneNode(true);
+    editContactBtn.parentNode.replaceChild(newBtn, editContactBtn);
 
+    newBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
 
+      if (!window.activeContactId) {
+        showDashboardToast("Error: No active contact selected.", "⚠️");
+        return;
+      }
 
+      const detailContactTag = document.getElementById('detail-contact-tag');
+      const detailEmail = document.getElementById('detail-email');
+      const detailPhone = document.getElementById('detail-phone');
+      const detailAiRec = document.getElementById('detail-ai-recommendation');
 
+      if (!detailContactTag || !detailEmail || !detailPhone || !detailAiRec) {
+        showDashboardToast("Error: Detail fields not found.", "⚠️");
+        return;
+      }
 
+      if (!window.isEditingContact) {
+        // Enter Edit Mode
+        window.isEditingContact = true;
+        newBtn.innerHTML = '💾 Save Contact';
+        newBtn.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+        newBtn.style.boxShadow = '0 4px 10px rgba(16, 185, 129, 0.25)';
 
+        // Save original values in case they click back/cancel
+        window.originalContactValues = {
+          name: detailContactTag.textContent.trim(),
+          email: detailEmail.textContent.trim(),
+          phone: detailPhone.textContent.trim(),
+          ai_recommendation: detailAiRec.textContent.trim()
+        };
 
+        // Replace with inputs
+        detailContactTag.innerHTML = `<input type="text" id="edit-contact-name" class="edit-input" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; padding: 4px 8px; color: #fff; font-size: 13px; font-weight: inherit; width: 100%; box-sizing: border-box;" value="${window.originalContactValues.name.replace(/"/g, '&quot;')}">`;
+        detailEmail.innerHTML = `<input type="email" id="edit-contact-email" class="edit-input" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; padding: 4px 8px; color: #fff; font-size: 13px; font-weight: inherit; width: 100%; box-sizing: border-box;" value="${window.originalContactValues.email.replace(/"/g, '&quot;')}">`;
+        detailPhone.innerHTML = `<input type="text" id="edit-contact-phone" class="edit-input" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; padding: 4px 8px; color: #fff; font-size: 13px; font-weight: inherit; width: 100%; box-sizing: border-box;" value="${window.originalContactValues.phone.replace(/"/g, '&quot;')}">`;
+        detailAiRec.innerHTML = `<textarea id="edit-contact-ai-rec" class="edit-input" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; padding: 8px; color: #fff; font-size: 13px; font-family: inherit; width: 100%; min-height: 80px; resize: vertical; margin-top: 6px; box-sizing: border-box;">${window.originalContactValues.ai_recommendation.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea>`;
+        detailAiRec.style.color = '#fff';
+      } else {
+        // Save Mode
+        const nameInput = document.getElementById('edit-contact-name');
+        const emailInput = document.getElementById('edit-contact-email');
+        const phoneInput = document.getElementById('edit-contact-phone');
+        const aiRecInput = document.getElementById('edit-contact-ai-rec');
 
+        const name = nameInput ? nameInput.value.trim() : '';
+        const email = emailInput ? emailInput.value.trim() : '';
+        const phone = phoneInput ? phoneInput.value.trim() : '';
+        const ai_recommendation = aiRecInput ? aiRecInput.value.trim() : '';
 
+        if (!name || !email || !phone) {
+          showDashboardToast("Name, Email, and Phone cannot be empty.", "⚠️");
+          return;
+        }
 
+        newBtn.disabled = true;
+        newBtn.innerHTML = 'Saving...';
 
+        try {
+          const { error: updErr } = await supabase
+            .from('contacts')
+            .update({
+              name,
+              email,
+              phone,
+              ai_recommendation
+            })
+            .eq('id', window.activeContactId);
 
+          if (updErr) {
+            console.error("[SUPABASE EDIT CONTACT] Save failed:", updErr);
+            showDashboardToast(`Database Error: ${updErr.message || 'Check permissions.'}`, '❌');
+            newBtn.disabled = false;
+            newBtn.innerHTML = '💾 Save Contact';
+            return;
+          }
+
+          console.log("[SUPABASE EDIT CONTACT] Contact updated successfully.");
+          showDashboardToast("🎉 Contact updated successfully!", "✓");
+
+          // Revert inputs to text nodes
+          detailContactTag.textContent = name;
+          detailEmail.textContent = email;
+          detailPhone.textContent = phone;
+          detailAiRec.textContent = ai_recommendation;
+
+          window.isEditingContact = false;
+          newBtn.disabled = false;
+          newBtn.innerHTML = '✏️ Edit Contact';
+          newBtn.style.background = 'linear-gradient(135deg, #a855f7 0%, #6366f1 100%)';
+          newBtn.style.boxShadow = '0 4px 10px rgba(168, 85, 247, 0.25)';
+
+          // Reload data
+          await fetchDashboardData();
+        } catch (ex) {
+          console.error("[SUPABASE EDIT CONTACT] Exception during save:", ex);
+          showDashboardToast(`Error: ${ex.message || ex}`, '❌');
+          newBtn.disabled = false;
+          newBtn.innerHTML = '💾 Save Contact';
+        }
+      }
+    });
+  };
+
+  window.initContactEditing();
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 // ============================================================
@@ -114134,262 +107524,241 @@ function getEmployeeDataAttributes(emp) {
 
 
 function renderLeaderboard() {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const tabActive = document.querySelector('.leaderboard-switch-tabs .switch-tab-btn.active');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const type = tabActive ? tabActive.getAttribute('data-type') : 'reps';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const timeframeSelect = document.getElementById('leaderboard-timeframe-dropdown');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const timeframe = timeframeSelect ? timeframeSelect.value : 'week';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   
+  const tableBody = document.getElementById('leaderboard-table-rows');
+  const headerRow = document.getElementById('leaderboard-table-headers');
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+  if (tableBody) {
+    if (window.supabaseLoading) {
+      tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 24px; color: #a855f7; font-family: 'Outfit'; font-weight: 500; font-size: 13px; background: rgba(168, 85, 247, 0.02);">● Loading live standings...</td></tr>`;
+      if (headerRow) headerRow.innerHTML = '';
+      return;
+    }
+    if (window.supabaseError || !window.supabaseLeaderboardLive) {
+      tableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 24px; color: #ef4444; font-family: 'Outfit'; font-weight: 500; font-size: 13px; background: rgba(239, 68, 68, 0.02);">● Live leaderboard unavailable</td></tr>`;
+      if (headerRow) headerRow.innerHTML = '';
+      return;
+    }
+  }
 
   let dataGroup = null;
+  const liveEmployees = getLiveEmployeesList();
+  
+  if (type === 'reps' || type === 'individuals') {
+    const list = type === 'reps' ? liveEmployees.filter(e => e.roleType === 'reps') : liveEmployees;
+    list.sort((a, b) => b.health - a.health);
+    
+    const rows = list.map((p, idx) => {
+      let giftsSent = p.gifts || 0;
+      if (timeframe === 'week') giftsSent = Math.max(1, Math.round(p.gifts * 0.1));
+      else if (timeframe === 'month') giftsSent = Math.max(1, Math.round(p.gifts * 0.4));
 
-  if (type === 'my-team' || type === 'all-teams' || type === 'individuals') {
-    let mult = 1;
-    if (timeframe === 'month') mult = 4;
-    else if (timeframe === 'quarter') mult = 12;
+      return {
+        rank: idx + 1,
+        name: p.name,
+        avatar: p.initials,
+        role: p.role,
+        score: `${p.health}%`,
+        scoreType: p.health >= 90 ? 'positive' : (p.health >= 75 ? 'neutral' : 'negative'),
+        color: p.colorClass || 'bg-blue',
+        val1: `${p.prospects}`,
+        val1Type: '',
+        val2: `${p.customers}`,
+        val2Type: '',
+        val3: `<div class="indicator-cell highlight-dispatched" style="color: #f59e0b; font-family: 'Outfit'; font-weight: 600;">${giftsSent} gifts</div>`
+      };
+    });
+    
+    dataGroup = {
+      headers: type === 'reps' 
+        ? ["Rank", "Rep Name", "Performance Score", "Active Prospects", "Active Customers", "Gifts Dispatched"]
+        : ['Rank', 'Representative', 'Health Score', 'Prospects', 'Customers', 'Gifts Sent'],
+      [timeframe]: rows
+    };
+  } else if (type === 'managers') {
+    const managers = liveEmployees.filter(e => e.roleType === 'managers');
+    managers.sort((a, b) => b.health - a.health);
+    
+    const rows = managers.map((p, idx) => {
+      const recRow = window.supabaseRecoveryLeaderboard ? window.supabaseRecoveryLeaderboard.find(r => r.name === p.name) : null;
+      const claimsRescued = recRow ? parseInt(recRow.claims_rescued) || 0 : 0;
+      const pipCompliance = Math.min(100, Math.max(80, p.health + 2));
+      const nudges = p.gifts * 2 || 6;
 
+      return {
+        rank: idx + 1,
+        name: p.name,
+        avatar: p.initials,
+        role: p.role,
+        score: `${p.health}%`,
+        scoreType: p.health >= 90 ? 'positive' : (p.health >= 75 ? 'neutral' : 'negative'),
+        color: p.colorClass || 'bg-indigo',
+        val1: `${pipCompliance}% ▲`,
+        val1Type: 'green-text',
+        val2: `${claimsRescued} rescue${claimsRescued === 1 ? '' : 's'}`,
+        val2Type: 'green-text',
+        val3: `<div class="indicator-cell" style="color: #c084fc; font-family: 'Outfit'; font-weight: 600;">${nudges} nudges</div>`
+      };
+    });
+    
+    dataGroup = {
+      headers: ["Rank", "Manager Name", "Management Index", "Pipeline Compliance", "Recovery Success", "Direct Nudges Sent"],
+      [timeframe]: rows
+    };
+  } else if (type === 'hr') {
+    const executives = liveEmployees.filter(e => e.roleType === 'executives');
+    executives.sort((a, b) => b.health - a.health);
+    
+    const rows = executives.map((p, idx) => {
+      let giftsSent = p.gifts || 0;
+      if (timeframe === 'week') giftsSent = Math.max(1, Math.round(p.gifts * 0.1));
+      else if (timeframe === 'month') giftsSent = Math.max(1, Math.round(p.gifts * 0.4));
+      const reviews = Math.max(1, Math.round(p.touchpoints * 0.2));
+
+      return {
+        rank: idx + 1,
+        name: p.name,
+        avatar: p.initials,
+        role: p.role,
+        score: `${p.health}%`,
+        scoreType: p.health >= 90 ? 'positive' : (p.health >= 75 ? 'neutral' : 'negative'),
+        color: p.colorClass || 'bg-blue',
+        val1: `${reviews} ▲`,
+        val1Type: 'green-text',
+        val2: `0`,
+        val2Type: 'neutral-text',
+        val3: `<div class="indicator-cell highlight-dispatched" style="color: #f59e0b; font-family: 'Outfit'; font-weight: 600;">${giftsSent} gifts</div>`
+      };
+    });
+    
+    dataGroup = {
+      headers: ["Rank", "Member Name", "Performance Score", "Performance Reviews", "Tasks Completed", "Gifts Dispatched"],
+      [timeframe]: rows
+    };
+  } else if (type === 'my-team') {
     const currentUserName = window.currentUsername || 'Tom Collins';
-    const allEmployees = typeof employeesData !== 'undefined' ? employeesData : [];
-    const selfEmp = allEmployees.find(e => e.name === currentUserName) || { name: currentUserName, manager: 'Jane Smith', roleType: 'reps' };
-    const repManager = selfEmp.manager || 'Jane Smith';
-
-    if (type === 'my-team') {
-      let peers = [];
-      const isManager = selfEmp.roleType === 'managers' || (window.currentRole === 'manager' && currentUserName === selfEmp.name);
+    const selfEmp = liveEmployees.find(e => e.name === currentUserName) || { name: currentUserName, manager: 'Jane Smith', roleType: 'reps' };
+    
+    let peers = [];
+    const isManager = selfEmp.roleType === 'managers' || (window.currentRole === 'manager' && currentUserName === selfEmp.name);
+    
+    if (isManager) {
+      peers = liveEmployees.filter(e => e.manager === currentUserName && e.roleType === 'reps');
+    } else {
+      const mgrName = selfEmp.manager;
+      const managerEmp = liveEmployees.find(e => e.name === mgrName);
+      const teamReps = liveEmployees.filter(e => e.manager === mgrName);
       
-      if (isManager) {
-        peers = allEmployees.filter(e => e.manager === currentUserName && e.roleType === 'reps');
-      } else {
-        const mgrName = selfEmp.manager;
-        const managerEmp = allEmployees.find(e => e.name === mgrName);
-        const teamReps = allEmployees.filter(e => e.manager === mgrName);
-        
-        if (managerEmp) {
-          peers.push(managerEmp);
-        }
-        teamReps.forEach(r => {
-          if (!peers.find(p => p.name === r.name)) {
-            peers.push(r);
-          }
-        });
+      if (managerEmp) {
+        peers.push(managerEmp);
       }
-      
-      peers.sort((a, b) => (b.health || 85) - (a.health || 85));
-
-      const peerRows = peers.map((p, idx) => {
-        let giftsSent = p.gifts || 0;
-        if (timeframe === 'week') giftsSent = Math.max(1, Math.round(p.gifts * 0.1));
-        else if (timeframe === 'month') giftsSent = Math.max(1, Math.round(p.gifts * 0.4));
-
-        return {
-          rank: idx + 1,
-          name: p.name,
-          avatar: p.initials || p.name.split(' ').map(n => n[0]).join(''),
-          role: p.role || 'Sales Rep',
-          score: `${p.health || 85}%`,
-          scoreType: (p.health || 85) >= 90 ? 'positive' : ((p.health || 85) >= 75 ? 'neutral' : 'negative'),
-          color: p.colorClass || 'bg-blue',
-          val1: `${p.prospects || 0}`,
-          val1Type: '',
-          val2: `${p.customers || 0}`,
-          val2Type: '',
-          val3: `<div class="indicator-cell highlight-dispatched" style="color: #f59e0b; font-family: 'Outfit'; font-weight: 600;">${giftsSent} gifts</div>`
-        };
-      });
-
-      dataGroup = {
-        headers: ['Rank', 'Representative', 'Health Score', 'Prospects', 'Customers', 'Gifts Sent'],
-        [timeframe]: peerRows
-      };
-    } else if (type === 'all-teams') {
-      const allowedManagers = ['Jane Smith', 'Marcus Dupond', 'Angela Martin'];
-      const managerTeams = {};
-      allEmployees.forEach(e => {
-        if (e.manager && allowedManagers.includes(e.manager)) {
-          const mgr = e.manager;
-          if (!managerTeams[mgr]) {
-            managerTeams[mgr] = [];
-          }
-          managerTeams[mgr].push(e);
+      teamReps.forEach(r => {
+        if (!peers.find(p => p.name === r.name)) {
+          peers.push(r);
         }
       });
-
-      const teams = [];
-      Object.keys(managerTeams).forEach(mgr => {
-        const members = managerTeams[mgr];
-        const count = members.length;
-        if (count === 0) return;
-        const avgHealth = Math.round(members.reduce((sum, m) => sum + m.health, 0) / count);
-        const totalProspects = members.reduce((sum, m) => sum + (m.prospects || 0), 0);
-        const totalCustomers = members.reduce((sum, m) => sum + (m.customers || 0), 0);
-        const totalGifts = members.reduce((sum, m) => sum + (m.gifts || 0), 0);
-
-        const mgrEmp = allEmployees.find(e => e.name === mgr) || {
-          name: mgr,
-          initials: mgr.split(' ').map(n => n[0]).join(''),
-          colorClass: 'bg-purple'
-        };
-
-        teams.push({
-          name: mgr + "'s Team",
-          initials: mgrEmp.initials,
-          role: "Managed by " + mgr + " (" + count + " members)",
-          colorClass: mgrEmp.colorClass || 'bg-purple',
-          health: avgHealth,
-          prospects: totalProspects,
-          customers: totalCustomers,
-          gifts: totalGifts,
-          empRef: mgrEmp
-        });
-      });
-
-      teams.sort((a, b) => b.health - a.health);
-
-      const teamRows = teams.map((t, idx) => {
-        let giftsSent = t.gifts;
-        if (timeframe === 'week') giftsSent = Math.max(1, Math.round(t.gifts * 0.1));
-        else if (timeframe === 'month') giftsSent = Math.max(1, Math.round(t.gifts * 0.4));
-
-        return {
-          rank: idx + 1,
-          name: t.name,
-          avatar: t.initials,
-          role: t.role,
-          color: t.colorClass,
-          score: `${t.health}%`,
-          scoreType: t.health >= 90 ? 'positive' : (t.health >= 75 ? 'neutral' : 'negative'),
-          val1: `${t.prospects}`,
-          val1Type: '',
-          val2: `${t.customers}`,
-          val2Type: '',
-          val3: `<div class="indicator-cell highlight-dispatched" style="color: #f59e0b; font-family: 'Outfit'; font-weight: 600;">${giftsSent} gifts</div>`
-        };
-      });
-
-      dataGroup = {
-        headers: ['Rank', 'Team Name', 'Avg Performance', 'Total Prospects', 'Total Customers', 'Total Gifts'],
-        [timeframe]: teamRows
-      };
-    } else if (type === 'individuals') {
-      const individuals = allEmployees.filter(e => e.roleType === 'reps' || e.roleType === 'managers' || e.roleType === 'executives');
-      individuals.sort((a, b) => b.health - a.health);
-
-      const individualRows = individuals.map((p, idx) => {
-        let giftsSent = p.gifts || 0;
-        if (timeframe === 'week') giftsSent = Math.max(1, Math.round(p.gifts * 0.1));
-        else if (timeframe === 'month') giftsSent = Math.max(1, Math.round(p.gifts * 0.4));
-
-        return {
-          rank: idx + 1,
-          name: p.name,
-          avatar: p.initials || p.name.split(' ').map(n => n[0]).join(''),
-          role: p.role || 'Sales Rep',
-          score: `${p.health || 85}%`,
-          scoreType: (p.health || 85) >= 90 ? 'positive' : ((p.health || 85) >= 75 ? 'neutral' : 'negative'),
-          color: p.colorClass || 'bg-blue',
-          val1: `${p.prospects || 0}`,
-          val1Type: '',
-          val2: `${p.customers || 0}`,
-          val2Type: '',
-          val3: `<div class="indicator-cell highlight-dispatched" style="color: #f59e0b; font-family: 'Outfit'; font-weight: 600;">${giftsSent} gifts</div>`
-        };
-      });
-
-      dataGroup = {
-        headers: ['Rank', 'Representative', 'Health Score', 'Prospects', 'Customers', 'Gifts Sent'],
-        [timeframe]: individualRows
-      };
     }
-  } else {
-    dataGroup = leaderboardData[type];
+    
+    peers.sort((a, b) => b.health - a.health);
+
+    const peerRows = peers.map((p, idx) => {
+      let giftsSent = p.gifts || 0;
+      if (timeframe === 'week') giftsSent = Math.max(1, Math.round(p.gifts * 0.1));
+      else if (timeframe === 'month') giftsSent = Math.max(1, Math.round(p.gifts * 0.4));
+
+      return {
+        rank: idx + 1,
+        name: p.name,
+        avatar: p.initials,
+        role: p.role,
+        score: `${p.health}%`,
+        scoreType: p.health >= 90 ? 'positive' : (p.health >= 75 ? 'neutral' : 'negative'),
+        color: p.colorClass || 'bg-blue',
+        val1: `${p.prospects}`,
+        val1Type: '',
+        val2: `${p.customers}`,
+        val2Type: '',
+        val3: `<div class="indicator-cell highlight-dispatched" style="color: #f59e0b; font-family: 'Outfit'; font-weight: 600;">${giftsSent} gifts</div>`
+      };
+    });
+
+    dataGroup = {
+      headers: ['Rank', 'Representative', 'Health Score', 'Prospects', 'Customers', 'Gifts Sent'],
+      [timeframe]: peerRows
+    };
+  } else if (type === 'all-teams') {
+    const allowedManagers = ['Jane Smith', 'Marcus Dupond', 'Angela Martin'];
+    const managerTeams = {};
+    liveEmployees.forEach(e => {
+      if (e.manager && allowedManagers.includes(e.manager)) {
+        const mgr = e.manager;
+        if (!managerTeams[mgr]) {
+          managerTeams[mgr] = [];
+        }
+        managerTeams[mgr].push(e);
+      }
+    });
+
+    const teams = [];
+    Object.keys(managerTeams).forEach(mgr => {
+      const members = managerTeams[mgr];
+      const count = members.length;
+      if (count === 0) return;
+      const avgHealth = Math.round(members.reduce((sum, m) => sum + m.health, 0) / count);
+      const totalProspects = members.reduce((sum, m) => sum + (m.prospects || 0), 0);
+      const totalCustomers = members.reduce((sum, m) => sum + (m.customers || 0), 0);
+      const totalGifts = members.reduce((sum, m) => sum + (m.gifts || 0), 0);
+
+      const mgrEmp = liveEmployees.find(e => e.name === mgr) || {
+        name: mgr,
+        initials: mgr.split(' ').map(n => n[0]).join(''),
+        colorClass: 'bg-purple'
+      };
+
+      teams.push({
+        name: mgr + "'s Team",
+        initials: mgrEmp.initials,
+        role: "Managed by " + mgr + " (" + count + " members)",
+        colorClass: mgrEmp.colorClass || 'bg-purple',
+        health: avgHealth,
+        prospects: totalProspects,
+        customers: totalCustomers,
+        gifts: totalGifts,
+        empRef: mgrEmp
+      });
+    });
+
+    teams.sort((a, b) => b.health - a.health);
+
+    const teamRows = teams.map((t, idx) => {
+      let giftsSent = t.gifts;
+      if (timeframe === 'week') giftsSent = Math.max(1, Math.round(t.gifts * 0.1));
+      else if (timeframe === 'month') giftsSent = Math.max(1, Math.round(t.gifts * 0.4));
+
+      return {
+        rank: idx + 1,
+        name: t.name,
+        avatar: t.initials,
+        role: t.role,
+        color: t.colorClass,
+        score: `${t.health}%`,
+        scoreType: t.health >= 90 ? 'positive' : (t.health >= 75 ? 'neutral' : 'negative'),
+        val1: `${t.prospects}`,
+        val1Type: '',
+        val2: `${t.customers}`,
+        val2Type: '',
+        val3: `<div class="indicator-cell highlight-dispatched" style="color: #f59e0b; font-family: 'Outfit'; font-weight: 600;">${giftsSent} gifts</div>`
+      };
+    });
+
+    dataGroup = {
+      headers: ['Rank', 'Team Name', 'Avg Performance', 'Total Prospects', 'Total Customers', 'Total Gifts'],
+      [timeframe]: teamRows
+    };
   }
 
   if (!dataGroup) return;
@@ -114402,7 +107771,7 @@ function renderLeaderboard() {
       const team = getTeamRoster(window.currentUsername);
       rows = rows.filter(r => team.includes(r.name));
     } else if (role === 'rep') {
-      const selfEmp = (typeof employeesData !== 'undefined' ? employeesData : []).find(e => e.name === window.currentUsername);
+      const selfEmp = (typeof liveEmployees !== 'undefined' ? liveEmployees : []).find(e => e.name === window.currentUsername);
       if (selfEmp && selfEmp.manager) {
         const peers = getTeamRoster(selfEmp.manager);
         rows = rows.filter(r => peers.includes(r.name));
@@ -114412,1016 +107781,68 @@ function renderLeaderboard() {
     }
   }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  const headerRow = document.getElementById('leaderboard-table-headers');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   if (headerRow && headers) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     headerRow.innerHTML = headers.map(h => `<th>${h}</th>`).join('');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  const tableBody = document.getElementById('leaderboard-table-rows');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   if (tableBody && rows) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     tableBody.innerHTML = rows.map(r => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       let searchName = r.name;
       if (searchName && searchName.endsWith("'s Team")) {
         searchName = searchName.substring(0, searchName.length - 7);
       }
-      const emp = employeesData.find(e => e.name === searchName) || {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      const emp = liveEmployees.find(e => e.name === searchName) || {
         name: r.name,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         initials: r.avatar,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         role: r.role,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         roleType: (type === 'reps' || type === 'my-team') ? 'reps' : (type === 'managers' || type === 'all-teams' ? 'managers' : 'executives'),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         manager: 'Gregory Sterling',
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         prospects: 5,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         customers: 5,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         gifts: 10,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         giftsReceived: 5,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         inactiveDays: 10,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         health: parseInt(r.score) || 85,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         colorClass: r.color,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         streetAddress: '100 Corporate Way',
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         phone: '(800) 555-0101',
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        email: `${r.name.toLowerCase().replace(/\s+/g, '')}@whitebox.com`,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        email: `${r.name.toLowerCase().replace(/\\s+/g, '')}@whitebox.com`,
         aiRecommend: 'Maintain active communication.'
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const medalClass = getMedalClass(r.rank);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const empAttrs = getEmployeeDataAttributes(emp);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       return `
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         <tr class="leaderboard-row-rectangular" style="animation: dropdownFadeIn 0.4s ease;">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                <span class="rank-badge ${medalClass}">${r.rank}</span>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            </td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                <div class="leaderboard-profile-cell">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                    <div class="profile-avatar ${r.color}">${r.avatar}</div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                    <div class="profile-meta">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                        <span ${empAttrs}>${r.name}</span>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                        <span class="profile-subtext">${r.role}</span>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                    </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            </td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                <div class="performance-score-badge ${r.scoreType}">${r.score} Score</div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            </td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                <div class="indicator-cell ${r.val1Type}">${r.val1}</div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            </td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                <div class="indicator-cell ${r.val2Type}">${r.val2}</div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            </td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <td>${r.val3}</td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+          <td>
+            <span class="rank-badge ${medalClass}">${r.rank}</span>
+          </td>
+          <td>
+            <div class="leaderboard-profile-cell">
+              <div class="profile-avatar ${r.color}">${r.avatar}</div>
+              <div class="profile-meta">
+                <span ${empAttrs}>${r.name}</span>
+                <span class="profile-subtext">${r.role}</span>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div class="performance-score-badge ${r.scoreType}">${r.score} Score</div>
+          </td>
+          <td>
+            <div class="indicator-cell ${r.val1Type}">${r.val1}</div>
+          </td>
+          <td>
+            <div class="indicator-cell ${r.val2Type}">${r.val2}</div>
+          </td>
+          <td>${r.val3}</td>
         </tr>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       `;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     }).join('');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Bind dynamic profile click actions for overview leaderboard names
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     bindDynamicNodeClicks('#leaderboard-table-rows .node-name');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
 
 
@@ -119599,7 +112020,8 @@ function renderEmployeesList() {
 
 
 
-  let filtered = employeesData.filter(emp => {
+  const baseEmployees = getLiveEmployeesList().length > 0 ? getLiveEmployeesList() : employeesData;
+  let filtered = baseEmployees.filter(emp => {
 
 
 
@@ -120001,6 +112423,10 @@ function renderEmployeesList() {
 
 
   updateEmployeesScorecards(filtered);
+  const countBadge = document.getElementById('employees-total-count');
+  if (countBadge) {
+    countBadge.textContent = filtered.length;
+  }
 
 
 
@@ -121185,6 +113611,11 @@ function renderEmployeesList() {
 
 
 function getTeamRoster(managerName) {
+  const liveEmps = getLiveEmployeesList();
+  if (liveEmps && liveEmps.length > 0) {
+    const reports = liveEmps.filter(e => e.manager === managerName).map(e => e.name);
+    return [managerName, ...reports];
+  }
   const employees = (typeof employeesData !== 'undefined' ? employeesData : []);
   const reports = employees.filter(e => e.manager === managerName).map(e => e.name);
   return [managerName, ...reports];
@@ -121306,7 +113737,9 @@ function updateOverviewDashboard() {
     }
   } else if (role === 'manager') {
     const mgrName = username;
-    const repRecords = (typeof employeesData !== 'undefined') ? employeesData.filter(e => e.manager && e.manager.trim().toLowerCase() === mgrName.trim().toLowerCase() && (e.roleType === 'reps' || e.roleType === 'employee')) : [];
+    const liveEmps = getLiveEmployeesList();
+    const allEmployees = (liveEmps && liveEmps.length > 0) ? liveEmps : ((typeof employeesData !== 'undefined') ? employeesData : []);
+    const repRecords = allEmployees.filter(e => e.manager && e.manager.trim().toLowerCase() === mgrName.trim().toLowerCase() && (e.roleType === 'reps' || e.roleType === 'employee'));
     const repsList = repRecords.map(r => r.name);
 
     // Total and average customers' health
@@ -121472,6 +113905,52 @@ function updateOverviewDashboard() {
       if (indicator) {
         indicator.setAttribute('data-tooltip', 'Appreciation boxes currently in queue, awaiting fulfillment, scheduled sends, and executive approvals.');
         indicator.innerHTML = `Pending approvals, fulfillment, and scheduled sends. <span class="info-icon">ⓘ</span>`;
+      }
+    }
+  }
+
+  // Override/Intercept Overview KPI Card values for Loading, Error, or Success states
+  if (window.supabaseLoading) {
+    if (card1) { const v = card1.querySelector('.kpi-value'); if (v) v.textContent = '...'; }
+    if (card2) { const v = card2.querySelector('.kpi-value'); if (v) v.textContent = '...'; }
+    if (card3) { const v = card3.querySelector('.kpi-value'); if (v) v.textContent = '...'; }
+    if (card4) { const v = card4.querySelector('.kpi-value'); if (v) v.textContent = '...'; }
+  } else if (window.supabaseError || !window.supabaseKPIs) {
+    if (card1) { const v = card1.querySelector('.kpi-value'); if (v) v.textContent = '—'; }
+    if (card2) { const v = card2.querySelector('.kpi-value'); if (v) v.textContent = '—'; }
+    if (card3) { const v = card3.querySelector('.kpi-value'); if (v) v.textContent = '—'; }
+    if (card4) { const v = card4.querySelector('.kpi-value'); if (v) v.textContent = '—'; }
+  } else if (window.supabaseKPIs) {
+    if (card1) {
+      const valEl = card1.querySelector('.kpi-value');
+      if (valEl) valEl.textContent = `${window.supabaseKPIs.avg_health}%`;
+    }
+    if (card2) {
+      const valEl = card2.querySelector('.kpi-value');
+      if (valEl) {
+        if (role === 'rep') {
+          valEl.textContent = `${window.supabaseKPIs.avg_health}%`;
+        } else if (role === 'manager') {
+          // Keep team health score card as is (average team representative health score)
+        } else {
+          valEl.textContent = `${window.supabaseKPIs.avg_health}%`;
+        }
+      }
+    }
+    if (card3) {
+      const valEl = card3.querySelector('.kpi-value');
+      if (valEl) valEl.textContent = window.supabaseKPIs.recovery_queue;
+    }
+    if (card4) {
+      const valEl = card4.querySelector('.kpi-value');
+      if (valEl) {
+        if (role === 'rep') {
+          valEl.textContent = window.getEmployeeTouchpointsCount ? window.getEmployeeTouchpointsCount(username) : 0;
+        } else if (role === 'manager') {
+          valEl.textContent = `${avgProspHealth}%`;
+        } else {
+          valEl.textContent = window.supabaseKPIs.queuedCount || 0;
+        }
       }
     }
   }
@@ -127874,6 +120353,9 @@ function bindDynamicNodeClicks(selector) {
 
 
     node.addEventListener('click', (e) => {
+      if (typeof window.cancelContactEdit === 'function') {
+        window.cancelContactEdit();
+      }
 
 
 
@@ -127960,6 +120442,15 @@ function bindDynamicNodeClicks(selector) {
 
 
       const type = node.getAttribute('data-type') || 'customer';
+      const editContactBtn = document.getElementById('btn-edit-contact');
+      if (editContactBtn) {
+        const lowerType = type.toLowerCase();
+        if (lowerType === 'customer' || lowerType === 'prospect') {
+          editContactBtn.style.display = 'inline-block';
+        } else {
+          editContactBtn.style.display = 'none';
+        }
+      }
 
 
 
@@ -129651,7 +122142,7 @@ function bindDynamicNodeClicks(selector) {
 
 
 
-        if (isOnBoard && type !== 'employee') {
+        if (isOnBoard && type !== 'employee' && (window.currentRole === 'owner' || window.activeUserRole === 'owner')) {
 
 
 
@@ -129763,7 +122254,7 @@ function bindDynamicNodeClicks(selector) {
 
 
 
-        if (isOnBoard && type !== 'employee') {
+        if (isOnBoard && type !== 'employee' && (window.currentRole === 'owner' || window.activeUserRole === 'owner')) {
 
 
 
@@ -135716,5123 +128207,310 @@ function initHREmployeeIntake() {
 
 
 function initCustomerIntake() {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const btnAdd = document.getElementById('btn-add-customer');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const modal = document.getElementById('customer-intake-modal');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const btnClose = document.getElementById('btn-customer-modal-close');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const btnCancel = document.getElementById('btn-customer-cancel');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const form = document.getElementById('customer-intake-form');
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const btnAddContact = document.getElementById('btn-add-customer-contact');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const contactsContainer = document.getElementById('additional-contacts-container');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const btnAddDate = document.getElementById('btn-add-customer-date');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const datesContainer = document.getElementById('customer-dates-container');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   if (!btnAdd || !modal) return;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   // Open Modal
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   btnAdd.addEventListener('click', (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     e.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     e.stopPropagation();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Bulletproof viewport centering: force modal element directly onto document.documentElement to bypass relative grids, transforms, and body zoom scaling!
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if (modal.parentElement !== document.documentElement) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       document.documentElement.appendChild(modal);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     modal.classList.add('show');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Helper to re-index additional contacts titles
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   const reindexContacts = () => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     const blocks = contactsContainer.querySelectorAll('.dynamic-block-item');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     blocks.forEach((block, idx) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const title = block.querySelector('.dynamic-block-title');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       if (title) title.textContent = `Additional Contact #${idx + 1}`;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Helper to re-index important dates titles
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   const reindexDates = () => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     const blocks = datesContainer.querySelectorAll('.dynamic-block-item');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     blocks.forEach((block, idx) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const title = block.querySelector('.dynamic-block-title');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       if (title) title.textContent = `Important Date #${idx + 1}`;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Add Dynamic Contact Block
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   if (btnAddContact && contactsContainer) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     btnAddContact.addEventListener('click', (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       e.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const newBlock = document.createElement('div');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       newBlock.className = 'dynamic-block-item';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       newBlock.setAttribute('data-type', 'contact');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       newBlock.innerHTML = `
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         <div class="dynamic-block-header">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <span class="dynamic-block-title">Additional Contact</span>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <button type="button" class="btn-remove-dynamic-item btn-remove-contact" title="Remove Contact">Remove</button>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         <div class="hr-form-grid">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="hr-form-group col-span-2">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <label class="hr-form-label">Contact Name <span style="color:#ef4444;">*</span></label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <input type="text" class="hr-form-input contact-name-input" placeholder="e.g. Jane Smith" required>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="hr-form-group">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <label class="hr-form-label">Job Title / Role</label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <input type="text" class="hr-form-input contact-title-input" placeholder="e.g. CFO / Operations Lead">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="hr-form-group col-span-2">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <label class="hr-form-label">Contact Email <span style="color:#ef4444;">*</span></label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <input type="email" class="hr-form-input contact-email-input" placeholder="e.g. jane@acme.com" required>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="hr-form-group">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <label class="hr-form-label">Contact Direct Phone <span style="color:#ef4444;">*</span></label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <input type="tel" class="hr-form-input contact-phone-input" placeholder="e.g. (555) 019-9988" required>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       `;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      // Bind Remove Event
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const removeBtn = newBlock.querySelector('.btn-remove-contact');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       removeBtn.addEventListener('click', (ev) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         ev.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         newBlock.remove();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         reindexContacts();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       contactsContainer.appendChild(newBlock);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       reindexContacts();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Add Dynamic Important Date Block
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   if (btnAddDate && datesContainer) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     btnAddDate.addEventListener('click', (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       e.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const newBlock = document.createElement('div');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       newBlock.className = 'dynamic-block-item';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       newBlock.setAttribute('data-type', 'date');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       newBlock.innerHTML = `
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         <div class="dynamic-block-header">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <span class="dynamic-block-title">Important Date</span>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <button type="button" class="btn-remove-dynamic-item btn-remove-date" title="Remove Date">Remove</button>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         <div class="hr-form-grid">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="hr-form-group col-span-2">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <label class="hr-form-label">Date Description / Label <span style="color:#ef4444;">*</span></label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <input type="text" class="hr-form-input date-label-input" placeholder="e.g. CEO's Birthday, Founding Anniversary" required>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+            <label class="hr-form-label">Event Type / Description <span style="color:#ef4444;">*</span></label>
+            <select class="hr-form-input date-type-input" required>
+              <option value="corporate-anniversary">Corporate Anniversary</option>
+              <option value="exec-birthday">Executive Birthday</option>
+              <option value="contract-renewal">Contract Renewal</option>
+              <option value="custom">Custom Milestone</option>
+            </select>
           </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="hr-form-group">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <label class="hr-form-label">Date <span style="color:#ef4444;">*</span></label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+            <label class="hr-form-label">Milestone Date <span style="color:#ef4444;">*</span></label>
             <input type="date" class="hr-form-input date-value-input" required>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       `;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      // Bind Remove Event
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const removeBtn = newBlock.querySelector('.btn-remove-date');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       removeBtn.addEventListener('click', (ev) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         ev.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         newBlock.remove();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         reindexDates();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       datesContainer.appendChild(newBlock);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       reindexDates();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Close Modal
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const closeModal = () => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     modal.classList.remove('show');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     form.reset();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Clear dynamic blocks
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if (contactsContainer) contactsContainer.innerHTML = '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if (datesContainer) datesContainer.innerHTML = '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Clear validation error highlights
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const inputs = form.querySelectorAll('.hr-form-input, .hr-form-select, .hr-form-textarea');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    inputs.forEach(inp => inp.classList.remove('validation-error'));
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   };
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   if (btnClose) btnClose.addEventListener('click', closeModal);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   if (btnCancel) btnCancel.addEventListener('click', closeModal);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Close modal when clicking on overlay background (Disabled to prevent accidental closing)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // modal.addEventListener('click', (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  //   if (e.target === modal) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  //     closeModal();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  //   }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Form Submission
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  form.addEventListener('submit', (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    e.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Retrieve input values
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const companyName = document.getElementById('customer-company-name').value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const sector = document.getElementById('customer-sector').value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const companyEmail = document.getElementById('customer-company-email').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const companyPhone = document.getElementById('customer-company-phone').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const streetAddress = document.getElementById('customer-street-address').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const city = document.getElementById('customer-city').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const province = document.getElementById('customer-province').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const postalCode = document.getElementById('customer-postal-code').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const contactName = document.getElementById('customer-contact-name').value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const contactTitle = document.getElementById('customer-contact-title').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const contactEmail = document.getElementById('customer-contact-email').value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const contactPhone = document.getElementById('customer-contact-phone').value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const assignedRep = document.getElementById('customer-assigned-rep').value;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const tier = document.getElementById('customer-tier').value;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const threshold = document.getElementById('customer-threshold').value;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const budget = document.getElementById('customer-budget').value;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Validate standard required inputs
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    let hasError = false;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const requiredInputs = [
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { id: 'customer-company-name', val: companyName },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { id: 'customer-sector', val: sector },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { id: 'customer-contact-name', val: contactName },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { id: 'customer-contact-email', val: contactEmail },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { id: 'customer-contact-phone', val: contactPhone }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    ];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    requiredInputs.forEach(item => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const el = document.getElementById(item.id);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (!item.val) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (el) el.classList.add('validation-error');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        hasError = true;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      } else {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (el) el.classList.remove('validation-error');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  if (form) {
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const companyName = document.getElementById('customer-company-name').value.trim();
+      const sector = document.getElementById('customer-sector').value.trim();
+      const companyEmail = document.getElementById('customer-company-email').value.trim();
+      const companyPhone = document.getElementById('customer-company-phone').value.trim();
+      const streetAddress = document.getElementById('customer-street-address').value.trim();
+      const city = document.getElementById('customer-city').value.trim();
+      const province = document.getElementById('customer-province').value.trim();
+      const postalCode = document.getElementById('customer-postal-code').value.trim();
+
+      const contactName = document.getElementById('customer-contact-name').value.trim();
+      const contactTitle = document.getElementById('customer-contact-title').value.trim();
+      const contactEmail = document.getElementById('customer-contact-email').value.trim();
+      const contactPhone = document.getElementById('customer-contact-phone').value.trim();
+
+      const assignedRep = document.getElementById('customer-assigned-rep').value;
+      const tier = document.getElementById('customer-tier').value;
+      const threshold = document.getElementById('customer-threshold').value;
+      const budget = document.getElementById('customer-budget').value;
+
+      let hasError = false;
+      const requiredInputs = [
+        { id: 'customer-company-name', val: companyName },
+        { id: 'customer-sector', val: sector },
+        { id: 'customer-company-email', val: companyEmail },
+        { id: 'customer-company-phone', val: companyPhone },
+        { id: 'customer-street-address', val: streetAddress },
+        { id: 'customer-city', val: city },
+        { id: 'customer-province', val: province },
+        { id: 'customer-postal-code', val: postalCode },
+        { id: 'customer-contact-name', val: contactName },
+        { id: 'customer-contact-email', val: contactEmail },
+        { id: 'customer-contact-phone', val: contactPhone }
+      ];
+
+      requiredInputs.forEach(item => {
+        const el = document.getElementById(item.id);
+        if (el) {
+          if (!item.val) {
+            el.classList.add('validation-error');
+            hasError = true;
+          } else {
+            el.classList.remove('validation-error');
+          }
+        }
+      });
+
+      if (hasError) {
+        showDashboardToast("Please fill in all required fields.", "⚠️");
+        return;
       }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Validate and compile dynamic secondary contacts
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const additionalContacts = [];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (contactsContainer) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      // Collect additional contacts
+      const additionalContacts = [];
       const contactBlocks = contactsContainer.querySelectorAll('.dynamic-block-item');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       contactBlocks.forEach(block => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const nameEl = block.querySelector('.contact-name-input');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const titleEl = block.querySelector('.contact-title-input');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const emailEl = block.querySelector('.contact-email-input');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const phoneEl = block.querySelector('.contact-phone-input');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const nameVal = nameEl.value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const titleVal = titleEl ? titleEl.value.trim() : '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const emailVal = emailEl.value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const phoneVal = phoneEl.value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Validate
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (!nameVal) { nameEl.classList.add('validation-error'); hasError = true; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else { nameEl.classList.remove('validation-error'); }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (!emailVal) { emailEl.classList.add('validation-error'); hasError = true; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else { emailEl.classList.remove('validation-error'); }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (!phoneVal) { phoneEl.classList.add('validation-error'); hasError = true; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else { phoneEl.classList.remove('validation-error'); }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        additionalContacts.push({
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          name: nameVal,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          title: titleVal || 'N/A',
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          email: emailVal,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          phone: phoneVal
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        const nameVal = block.querySelector('.contact-name-input').value.trim();
+        const roleVal = block.querySelector('.contact-title-input').value.trim();
+        const emailVal = block.querySelector('.contact-email-input').value.trim();
+        const phoneVal = block.querySelector('.contact-phone-input').value.trim();
+        if (nameVal && emailVal && phoneVal) {
+          additionalContacts.push({ name: nameVal, title: roleVal, email: emailVal, phone: phoneVal });
+        }
       });
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Validate and compile dynamic custom important dates
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const importantDates = [];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (datesContainer) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      // Collect important dates
+      const importantDates = [];
       const dateBlocks = datesContainer.querySelectorAll('.dynamic-block-item');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       dateBlocks.forEach(block => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const labelEl = block.querySelector('.date-label-input');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const dateValEl = block.querySelector('.date-value-input');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const labelVal = labelEl.value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const dateVal = dateValEl.value;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Validate
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (!labelVal) { labelEl.classList.add('validation-error'); hasError = true; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else { labelEl.classList.remove('validation-error'); }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (!dateVal) { dateValEl.classList.add('validation-error'); hasError = true; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else { dateValEl.classList.remove('validation-error'); }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        importantDates.push({
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          label: labelVal,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          date: dateVal
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        const typeVal = block.querySelector('.date-type-input').value;
+        const valVal = block.querySelector('.date-value-input').value;
+        if (valVal) {
+          importantDates.push({ type: typeVal, date: valVal });
+        }
       });
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (hasError) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      showDashboardToast("Please fill in all required corporate contact and milestone date fields highlighted in red.", "⚠️");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      return;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Compute initials from Company Name (e.g. Acme Corporation -> AC)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    let initials = "CO";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (companyName) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const parts = companyName.split(' ');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (parts.length >= 2) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        initials = (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      } else if (parts.length === 1) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        initials = parts[0].substring(0, 2).toUpperCase();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      const submitBtn = document.getElementById('btn-customer-submit');
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Registering...';
       }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Tasteful background avatar classes
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const randomColor = "bg-blue";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Construct new customer dataset item
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const newCustomer = {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      name: companyName,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      initials: initials,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      sector: sector,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      rep: assignedRep,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      prospects: 0,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      customers: 1, // Freshly added Customer count
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      gifts: 0,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      inactiveDays: 0, // Registered today
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      health: 100, // Starts at perfect score
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      colorClass: randomColor,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      streetAddress: streetAddress,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      contact: contactName,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      city: city,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      province: province,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      postal: postalCode,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      prospect: new Date().toISOString().split('T')[0],
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      customer: new Date().toISOString().split('T')[0],
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      phone: contactPhone,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      email: contactEmail,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      additionalContacts: additionalContacts,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      importantDates: importantDates,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      aiRecommend: importantDates.length ? `Custom dates tracked: ${importantDates.length} scheduled. Box budget set: ${budget}.` : `Corporate onboarding registered with Box budget: ${budget}.`,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      category: tier.toLowerCase() === 'enterprise' ? 'enterprise' : (tier.toLowerCase() === 'mid-market' ? 'mid-market' : 'sme')
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Push into global array
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    customersData.push(newCustomer);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    updateTabPillBadges();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Success Toast
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    showDashboardToast(`🎉 B2B Customer Registered! ${companyName} added successfully.`, '✓');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Close Modal
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    closeModal();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Instantly Re-render Customers Table and Scorecard KPIs
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    renderCustomersList();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      (async () => {
+        try {
+          // 1. Resolve rep ID from name
+          const cleanRepName = assignedRep.replace(/\s*\(.*\)/, '').trim();
+          const { data: repProf, error: repProfErr } = await supabase
+            .from('profiles')
+            .select('id')
+            .ilike('name', `%${cleanRepName}%`)
+            .limit(1);
+          if (repProfErr) {
+            console.error("[SUPABASE CUSTOMER INTAKE] Rep resolve failed:", repProfErr);
+          }
+          const repId = repProf && repProf[0] ? repProf[0].id : null;
+
+          // 2. Insert organization
+          const { data: newOrg, error: orgErr } = await supabase
+            .from('organizations')
+            .insert({
+              name: companyName,
+              sector: sector,
+              category: tier.toLowerCase() === 'enterprise' ? 'enterprise' : (tier.toLowerCase() === 'mid-market' ? 'mid-market' : 'sme'),
+              street_address: streetAddress,
+              city: city,
+              province: province,
+              postal_code: postalCode,
+              phone: companyPhone,
+              email: companyEmail,
+              workspace_id: window.activeWorkspaceId || 'd9b0a1a0-0000-0000-0000-000000000001'
+            })
+            .select()
+            .single();
+
+          if (orgErr) {
+            console.error("[SUPABASE CUSTOMER INTAKE] Organization insert failed:", orgErr);
+            showDashboardToast(`Database Error: ${orgErr.message || orgErr.details || 'Check permission details.'}`, '❌');
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.textContent = 'Add New Customer';
+            }
+            return;
+          }
+
+          // 3. Insert contact
+          const { data: newCont, error: contErr } = await supabase
+            .from('contacts')
+            .insert({
+              org_id: newOrg.id,
+              name: contactName,
+              email: contactEmail,
+              phone: contactPhone,
+              assigned_rep_id: repId,
+              relationship_health: 100,
+              ai_recommendation: importantDates.length ? `Custom dates tracked: ${importantDates.length} scheduled. Box budget set: ${budget}.` : `Corporate onboarding registered with Box budget: ${budget}.`,
+              workspace_id: window.activeWorkspaceId || 'd9b0a1a0-0000-0000-0000-000000000001'
+            })
+            .select()
+            .single();
+
+          if (contErr) {
+            console.error("[SUPABASE CUSTOMER INTAKE] Contact insert failed:", contErr);
+            showDashboardToast(`Database Error: ${contErr.message || contErr.details || 'Check permission details.'}`, '❌');
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.textContent = 'Add New Customer';
+            }
+            return;
+          }
+
+          console.log("[SUPABASE CUSTOMER INTAKE] Successfully registered customer contact in database.");
+          showDashboardToast("🎉 B2B Customer Registered! " + companyName + " added successfully.", "✓");
+
+          // Close modal and reset form
+          closeModal();
+
+          // 4. Reload data
+          await fetchDashboardData();
+
+        } catch (err) {
+          console.error("[SUPABASE CUSTOMER INTAKE] Exception during registration:", err);
+          showDashboardToast("Error: " + (err.message || err), "❌");
+        } finally {
+          if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Add New Customer';
+          }
+        }
+      })();
+    });
+  }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 function initEmployeesDirectory() {
@@ -141877,7 +129555,9 @@ function renderActiveEmployeesList() {
 
 
 
-  const activeReps = employeesData.filter(emp => {
+  const liveEmps = getLiveEmployeesList();
+  const allEmployees = (liveEmps && liveEmps.length > 0) ? liveEmps : employeesData;
+  const activeReps = allEmployees.filter(emp => {
     if (emp.isWorking !== true) return false;
     return true;
   });
@@ -143181,6 +130861,17 @@ function renderEmployeesSubLeaderboard() {
   const headersRow = document.getElementById('leaderboard-table-headers-emp');
   if (!tbody || !headersRow) return;
 
+  if (window.supabaseLoading) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 24px; color: #a855f7; font-family: 'Outfit'; font-weight: 500; font-size: 13px; background: rgba(168, 85, 247, 0.02);">● Loading live standings...</td></tr>`;
+    if (headersRow) headersRow.innerHTML = '';
+    return;
+  }
+  if (window.supabaseError || !window.supabaseLeaderboardLive) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 24px; color: #ef4444; font-family: 'Outfit'; font-weight: 500; font-size: 13px; background: rgba(239, 68, 68, 0.02);">● Live leaderboard unavailable</td></tr>`;
+    if (headersRow) headersRow.innerHTML = '';
+    return;
+  }
+
   const activeTypeBtn = document.querySelector('#leaderboard-switch-tabs-emp .switch-tab-btn.active');
   const type = activeTypeBtn ? activeTypeBtn.getAttribute('data-type') : 'my-team';
   const tfSelect = document.getElementById('leaderboard-timeframe-dropdown-emp');
@@ -143189,16 +130880,14 @@ function renderEmployeesSubLeaderboard() {
   let headers = [];
   let rows = [];
 
-  let factor = 1;
-  if (timeframe === 'month') factor = 4;
-  if (timeframe === 'quarter') factor = 12;
+  const liveEmployees = getLiveEmployeesList();
 
   if (type === 'my-team') {
     headers = ["Rank", "Rep Name", "Performance Score", "Active Prospects", "Active Customers", "Gifts Dispatched"];
     const username = window.currentUsername || 'Tom Collins';
     const role = window.currentRole || 'rep';
     
-    const selfEmp = (typeof employeesData !== 'undefined' ? employeesData : []).find(e => e.name === username);
+    const selfEmp = liveEmployees.find(e => e.name === username);
     let managerName = 'Jane Smith';
     if (role === 'manager') {
       managerName = username;
@@ -143206,7 +130895,7 @@ function renderEmployeesSubLeaderboard() {
       managerName = selfEmp.manager;
     }
 
-    const peers = (typeof employeesData !== 'undefined' ? employeesData : []).filter(e => e.manager === managerName && e.roleType === 'reps');
+    const peers = liveEmployees.filter(e => e.manager === managerName && e.roleType === 'reps');
     peers.sort((a, b) => b.health - a.health);
 
     rows = peers.map((p, idx) => {
@@ -143231,7 +130920,7 @@ function renderEmployeesSubLeaderboard() {
     headers = ["Rank", "Team / Manager", "Avg Performance", "Total Prospects", "Total Customers", "Total Gifts"];
     const allowedManagers = ['Jane Smith', 'Marcus Dupond', 'Angela Martin'];
     const managerTeams = {};
-    (typeof employeesData !== 'undefined' ? employeesData : []).forEach(e => {
+    liveEmployees.forEach(e => {
       if (e.manager && allowedManagers.includes(e.manager)) {
         const mgr = e.manager;
         if (!managerTeams[mgr]) {
@@ -143251,7 +130940,7 @@ function renderEmployeesSubLeaderboard() {
       const totalCustomers = members.reduce((sum, m) => sum + (m.customers || 0), 0);
       const totalGifts = members.reduce((sum, m) => sum + (m.gifts || 0), 0);
 
-      const mgrEmp = (typeof employeesData !== 'undefined' ? employeesData : []).find(e => e.name === mgr) || {
+      const mgrEmp = liveEmployees.find(e => e.name === mgr) || {
         name: mgr,
         initials: mgr.split(' ').map(n => n[0]).join(''),
         colorClass: 'bg-purple'
@@ -143292,7 +130981,7 @@ function renderEmployeesSubLeaderboard() {
     });
   } else if (type === 'individuals') {
     headers = ["Rank", "Name", "Performance Score", "Active Prospects", "Active Customers", "Gifts Dispatched"];
-    const individuals = (typeof employeesData !== 'undefined' ? employeesData : []).filter(e => {
+    const individuals = liveEmployees.filter(e => {
       return e.roleType === 'reps' || e.roleType === 'managers' || e.roleType === 'executives';
     });
     individuals.sort((a, b) => b.health - a.health);
@@ -144757,169 +132446,7 @@ window.sendRelationshipToRecoveryBoard = function(client) {
 
 
 
-let customersData = [
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Apex Global Retail", initials: "AR", sector: "Retail Systems", rep: "Sarah Lansky", prospects: 3, customers: 12, gifts: 24, inactiveDays: 5, health: 96, colorClass: "bg-blue", streetAddress: "120 Broadway", contact: "Sarah Jenkins", city: "New York", province: "NY", postal: "10005", prospect: "2026-02-14", customer: "2026-03-20", phone: "(212) 555-0155", email: "contact@apex.com", aiRecommend: "Send Premium Box for anniversary.", category: "enterprise" },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Chevron Solutions", initials: "CS", sector: "Energy Infrastructure", rep: "Marcus Dupond", prospects: 2, customers: 15, gifts: 18, inactiveDays: 12, health: 92, colorClass: "bg-indigo", streetAddress: "450 Energy Way", contact: "John Doe", city: "Houston", province: "TX", postal: "77002", prospect: "2026-01-10", customer: "2026-02-28", phone: "(713) 555-0122", email: "info@chevron.com", aiRecommend: "Send Sweet Box for reaching retention.", category: "enterprise" },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Vanguard Health", initials: "VH", sector: "Global Supply Chain", rep: "Tom Collins", prospects: 4, customers: 8, gifts: 10, inactiveDays: 62, health: 58, colorClass: "bg-red", streetAddress: "78 Logistics Way", contact: "Tom Higgins", city: "Chicago", province: "IL", postal: "60606", prospect: "2025-11-15", customer: "2026-01-08", phone: "(312) 555-0188", email: "ops@vanguard.com", aiRecommend: "Schedule recovery call; recommend Sweet Box for reaching retention.", category: "mid-market" },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "OmniCorp Tech", initials: "OT", sector: "Enterprise Software", rep: "Jack R.", prospects: 5, customers: 18, gifts: 30, inactiveDays: 8, health: 95, colorClass: "bg-teal", streetAddress: "88 Tech Plaza", contact: "Alice Vance", city: "San Francisco", province: "CA", postal: "94105", prospect: "2026-02-05", customer: "2026-04-12", phone: "(415) 555-0199", email: "hello@omnicorp.com", aiRecommend: "Send Pack Box for birthday.", category: "enterprise" },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Summit Financial", initials: "SF", sector: "Wealth Management", rep: "Anna L.", prospects: 2, customers: 6, gifts: 8, inactiveDays: 34, health: 81, colorClass: "bg-orange", streetAddress: "500 Finance Blvd", contact: "Marcus Miller", city: "Boston", province: "MA", postal: "02109", prospect: "2026-03-01", customer: "2026-04-05", phone: "(617) 555-0133", email: "vip@summit.com", aiRecommend: "Send Premium Box for anniversary.", category: "mid-market" },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Nova Financial", initials: "NF", sector: "Medical Systems", rep: "Jack R.", prospects: 3, customers: 7, gifts: 12, inactiveDays: 45, health: 74, colorClass: "bg-teal", streetAddress: "200 Health Ave", contact: "Dr. Aris", city: "Seattle", province: "WA", postal: "98104", prospect: "2026-03-10", customer: "2026-04-20", phone: "(206) 555-0144", email: "admin@nova.com", aiRecommend: "Send Sweet Box for reaching retention.", category: "sme" },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Horizon Logistics", initials: "HL", sector: "Transportation", rep: "Jane Smith", prospects: 4, customers: 10, gifts: 14, inactiveDays: 15, health: 88, colorClass: "bg-purple", streetAddress: "14 Logistics Way", contact: "Jack Smith", city: "Dallas", province: "TX", postal: "75201", prospect: "2026-02-18", customer: "2026-03-25", phone: "(214) 555-0111", email: "ship@horizon.com", aiRecommend: "Nudge manager; suggest Pack Box for birthday.", category: "mid-market" },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Pinnacle Brands", initials: "PB", sector: "Consumer Goods", rep: "Tom Collins", prospects: 1, customers: 5, gifts: 6, inactiveDays: 68, health: 62, colorClass: "bg-red", streetAddress: "99 Brand St", contact: "Lisa Kudrow", city: "Los Angeles", province: "CA", postal: "90015", prospect: "2025-12-08", customer: "2026-02-01", phone: "(213) 555-0177", email: "sales@pinnacle.com", aiRecommend: "Executive check-in: recommend Premium Box for anniversary.", category: "sme" },
-  { name: "Schrute Farms Beet Co", initials: "SF", sector: "Agriculture & Agri-Tourism", rep: "Dwight Schrute", prospects: 5, customers: 25, gifts: 35, inactiveDays: 2, health: 98, colorClass: "bg-purple", streetAddress: "1725 Slough Avenue", contact: "Mose Schrute", city: "Scranton", province: "PA", postal: "18505", prospect: "2026-01-15", customer: "2026-02-20", phone: "(570) 555-0151", email: "mose@schrute-farms.com", aiRecommend: "Highly healthy account; consider seasonal appreciation gift.", category: "enterprise" },
-  { name: "Scranton Business Park", initials: "SP", sector: "Real Estate Management", rep: "Dwight Schrute", prospects: 2, customers: 12, gifts: 14, inactiveDays: 8, health: 91, colorClass: "bg-blue", streetAddress: "1725 Slough Avenue", contact: "Billy Merchant", city: "Scranton", province: "PA", postal: "18505", prospect: "2026-02-01", customer: "2026-03-05", phone: "(570) 555-0152", email: "billy@scranton-bp.com", aiRecommend: "Send Premium Box to key decision maker.", category: "mid-market" }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+let customersData = [];
 
 
 
@@ -145003,6 +132530,18 @@ function renderCustomersList() {
   const tableBody = document.getElementById('customers-table-rows');
   if (!tableBody) return;
 
+  if (window.supabaseLoading) {
+    tableBody.innerHTML = `<tr><td colspan="7" class="loading-state" style="text-align: center; padding: 30px; color: #a855f7; font-family: 'Outfit', sans-serif;">● Loading customers from Supabase...</td></tr>`;
+    updateCustomersScorecards([]);
+    return;
+  }
+
+  if (window.supabaseError) {
+    tableBody.innerHTML = `<tr><td colspan="7" class="error-state" style="text-align: center; padding: 30px; color: #ef4444; font-family: 'Outfit', sans-serif;">● Connection issue: Live customers data unavailable</td></tr>`;
+    updateCustomersScorecards([]);
+    return;
+  }
+
   // 1. Filter dataset
   let filtered = customersData.filter(cust => {
     // Role based filtering
@@ -145010,7 +132549,8 @@ function renderCustomersList() {
       if (cust.rep !== (window.currentUsername || 'Tom Collins')) return false;
     } else if (window.currentRole === 'manager') {
       const managerName = window.currentUsername || 'Marcus Dupond';
-      const allEmployees = typeof employeesData !== 'undefined' ? employeesData : [];
+      const liveEmps = getLiveEmployeesList();
+      const allEmployees = (liveEmps && liveEmps.length > 0) ? liveEmps : (typeof employeesData !== 'undefined' ? employeesData : []);
       const directReps = allEmployees.filter(e => e.manager === managerName && e.roleType === 'reps').map(e => e.name);
       if (window.managerCustViewMode === 'mine') {
         if (cust.rep !== managerName) return false;
@@ -145392,6 +132932,11 @@ function renderCustomersList() {
 
   updateCustomersScorecards(filtered);
 
+  if (filtered.length === 0) {
+    tableBody.innerHTML = `<tr><td colspan="7" class="empty-state" style="text-align: center; padding: 30px; color: #94a3b8; font-family: 'Outfit', sans-serif;">No customers found.</td></tr>`;
+    return;
+  }
+
 
 
 
@@ -145742,23 +133287,10 @@ function renderCustomersList() {
 
 
 
-    const dotColor = inactivityStatus === 'red' ? 'dot-red' : (inactivityStatus === 'orange' ? 'dot-orange' : 'dot-green');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const statusTextClass = inactivityStatus === 'red' ? 'red-text' : (inactivityStatus === 'orange' ? 'orange-text' : 'green-text');
+    // TEMPORARY FRONTEND HANDLING RULE: If inactiveDays is 999, display "No activity yet" instead of "999 days ago".
+    const daysText = cust.inactiveDays === 999 ? 'No activity yet' : `${cust.inactiveDays} days ago`;
+    const dotColor = cust.inactiveDays === 999 ? 'dot-gray' : (inactivityStatus === 'red' ? 'dot-red' : (inactivityStatus === 'orange' ? 'dot-orange' : 'dot-green'));
+    const statusTextClass = cust.inactiveDays === 999 ? 'gray-text' : (inactivityStatus === 'red' ? 'red-text' : (inactivityStatus === 'orange' ? 'orange-text' : 'green-text'));
 
 
 
@@ -146048,7 +133580,7 @@ function renderCustomersList() {
 
 
 
-            <span class="status-days ${statusTextClass}">${cust.inactiveDays} days ago</span>
+            <span class="status-days ${statusTextClass}">${daysText}</span>
 
 
 
@@ -146417,6 +133949,32 @@ function updateCustomersScorecards(dataset) {
 
 
   const giftsVal = document.getElementById('cust-card-gifts-val');
+
+  const isFiltered = (dataset.length !== (typeof customersData !== 'undefined' ? customersData.length : 0));
+  if (!isFiltered) {
+    if (window.supabaseLoading) {
+      if (totalVal) totalVal.textContent = '...';
+      if (healthVal) { healthVal.textContent = '...'; healthVal.className = 'kpi-value'; }
+      if (neglectedVal) neglectedVal.textContent = '...';
+      if (giftsVal) giftsVal.textContent = '...';
+      return;
+    } else if (window.supabaseError || !window.supabaseKPIs) {
+      if (totalVal) totalVal.textContent = '—';
+      if (healthVal) { healthVal.textContent = '—'; healthVal.className = 'kpi-value'; }
+      if (neglectedVal) neglectedVal.textContent = '—';
+      if (giftsVal) giftsVal.textContent = '—';
+      return;
+    } else if (window.supabaseKPIs) {
+      if (totalVal) totalVal.textContent = window.supabaseKPIs.clients;
+      if (healthVal) {
+        healthVal.textContent = `${window.supabaseKPIs.avg_health}%`;
+        healthVal.className = `kpi-value ${window.supabaseKPIs.avg_health >= 90 ? 'text-green' : (window.supabaseKPIs.avg_health >= 75 ? 'text-orange' : 'text-red')}`;
+      }
+      if (neglectedVal) neglectedVal.textContent = window.supabaseKPIs.neglected_count;
+      if (giftsVal) giftsVal.textContent = window.supabaseKPIs.deliveredCount;
+      return;
+    }
+  }
 
 
 
@@ -147776,185 +135334,11 @@ function initCustomersDirectory() {
 
 
 
-let prospectsData = [
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Starlight Ventures", initials: "SV", sector: "Venture Capital", rep: "Sarah Lansky", prospects: 12, customers: 0, gifts: 4, inactiveDays: 8, health: 95, colorClass: "bg-blue", streetAddress: "12 Finance Blvd", contact: "Stella Harris", city: "San Francisco", province: "CA", postal: "94104", prospect: "2026-04-01", customer: "N/A", phone: "(415) 555-0123", email: "pitch@starlight.com", aiRecommend: "Send Sweet Box for reaching retention.", category: "hot", dealValue: 150000 },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Delta Aerospace", initials: "DA", sector: "Aerospace Manufacturing", rep: "Marcus Dupond", prospects: 8, customers: 0, gifts: 2, inactiveDays: 14, health: 88, colorClass: "bg-indigo", streetAddress: "88 Runway Rd", contact: "Alan Shepard", city: "Seattle", province: "WA", postal: "98108", prospect: "2026-03-18", customer: "N/A", phone: "(206) 555-0145", email: "ops@delta.com", aiRecommend: "Send Pack Box for birthday.", category: "hot", dealValue: 85000 },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Orion Biotech", initials: "OB", sector: "Biotech Systems", rep: "Tom Collins", prospects: 14, customers: 0, gifts: 6, inactiveDays: 64, health: 54, colorClass: "bg-red", streetAddress: "23 Innovation Ave", contact: "Dr. Robert Vance", city: "Boston", province: "MA", postal: "02111", prospect: "2026-02-10", customer: "N/A", phone: "(617) 555-0167", email: "rnd@orion.com", aiRecommend: "Schedule recovery call; suggest Premium Box for anniversary.", category: "warm", dealValue: 120000 },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Beacon Logistics", initials: "BL", sector: "Freight Systems", rep: "Jack R.", prospects: 6, customers: 0, gifts: 1, inactiveDays: 45, health: 76, colorClass: "bg-teal", streetAddress: "300 Cargo Lane", contact: "Ben Franklin", city: "Atlanta", province: "GA", postal: "30320", prospect: "2026-04-10", customer: "N/A", phone: "(404) 555-0189", email: "freight@beacon.com", aiRecommend: "Nudge rep; suggest Sweet Box for reaching retention.", category: "warm", dealValue: 45000 },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Eclipse Retail", initials: "ER", sector: "E-commerce Platforms", rep: "Anna L.", prospects: 5, customers: 0, gifts: 3, inactiveDays: 10, health: 90, colorClass: "bg-orange", streetAddress: "501 Shop Dr", contact: "Evelyn Sharp", city: "Los Angeles", province: "CA", postal: "90014", prospect: "2026-04-15", customer: "N/A", phone: "(213) 555-0112", email: "support@eclipse.com", aiRecommend: "Introductory sequence: recommend Sweet Box for reaching retention.", category: "cold", dealValue: 60000 },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Vortex Digital", initials: "VD", sector: "SaaS Marketing", rep: "Jack R.", prospects: 10, customers: 0, gifts: 5, inactiveDays: 32, health: 82, colorClass: "bg-teal", streetAddress: "88 Cloud St", contact: "Vincent Chase", city: "New York", province: "NY", postal: "10012", prospect: "2026-04-20", customer: "N/A", phone: "(212) 555-0134", email: "hello@vortex.com", aiRecommend: "Send Sweet Box for reaching retention.", category: "hot", dealValue: 95000 },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Zenith Energy", initials: "ZE", sector: "Green Infrastructure", rep: "Jane Smith", prospects: 7, customers: 0, gifts: 2, inactiveDays: 5, health: 97, colorClass: "bg-purple", streetAddress: "10 Green Rd", contact: "Zoe Saldana", city: "Denver", province: "CO", postal: "80202", prospect: "2026-05-01", customer: "N/A", phone: "(303) 555-0156", email: "info@zenith.com", aiRecommend: "High conversion; recommend Premium Box for anniversary.", category: "warm", dealValue: 130000 },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Summit Media", initials: "SM", sector: "Digital Media", rep: "Tom Collins", prospects: 4, customers: 0, gifts: 0, inactiveDays: 68, health: 48, colorClass: "bg-red", streetAddress: "44 Media Way", contact: "Samuel Jackson", city: "Austin", province: "TX", postal: "78701", prospect: "2026-03-05", customer: "N/A", phone: "(512) 555-0178", email: "hello@summitmedia.com", aiRecommend: "Reassign lead; suggest Premium Box for anniversary.", category: "cold", dealValue: 35000 },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Chevron Logistics", initials: "CL", sector: "Logistics & Supply", rep: "Tom Collins", prospects: 8, customers: 0, gifts: 2, inactiveDays: 42, health: 78, colorClass: "bg-orange", streetAddress: "500 Logistics Way", contact: "Sarah Jenkins", city: "Houston", province: "TX", postal: "77002", prospect: "2026-04-16", customer: "N/A", phone: "(800) 555-0199", email: "ops@chevronlogistics.com", aiRecommend: "Send Premium Box for anniversary.", category: "warm", dealValue: 95000 },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  { name: "Apex Solutions", initials: "AS", sector: "Tech Consulting", rep: "Anna L.", prospects: 6, customers: 0, gifts: 1, inactiveDays: 24, health: 82, colorClass: "bg-blue", streetAddress: "120 Technology Dr", contact: "Diana Prince", city: "New York", province: "NY", postal: "10005", prospect: "2026-05-04", customer: "N/A", phone: "(212) 555-0155", email: "contact@apexsolutions.com", aiRecommend: "Send Sweet Box for reaching retention.", category: "hot", dealValue: 75000 },
-  { name: "Dunder Mifflin Utica", initials: "DM", sector: "Paper & Office Supplies", rep: "Dwight Schrute", prospects: 8, customers: 0, gifts: 2, inactiveDays: 5, health: 94, colorClass: "bg-orange", streetAddress: "100 Genesis Way", contact: "Karen Filippelli", city: "Utica", province: "NY", postal: "13502", prospect: "2026-05-10", customer: "N/A", phone: "(315) 555-0180", email: "k.filippelli@dundermifflin.com", aiRecommend: "Warm lead; follow up with samples.", category: "hot", dealValue: 65000 },
-  { name: "Lackawanna County", initials: "LC", sector: "Government Administration", rep: "Dwight Schrute", prospects: 12, customers: 0, gifts: 3, inactiveDays: 14, health: 87, colorClass: "bg-teal", streetAddress: "200 Adams Avenue", contact: "County Commissioner", city: "Scranton", province: "PA", postal: "18503", prospect: "2026-05-12", customer: "N/A", phone: "(570) 555-0199", email: "commissioner@lackawanna.gov", aiRecommend: "Send Sweet Box for relationship development.", category: "warm", dealValue: 125000 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-];
+let prospectsData = [];
 
 
 
@@ -148054,6 +135438,18 @@ function renderProspectsList() {
   const tableBody = document.getElementById('prospects-table-rows');
   if (!tableBody) return;
 
+  if (window.supabaseLoading) {
+    tableBody.innerHTML = `<tr><td colspan="7" class="loading-state" style="text-align: center; padding: 30px; color: #a855f7; font-family: 'Outfit', sans-serif;">● Loading prospects from Supabase...</td></tr>`;
+    updateProspectsScorecards([]);
+    return;
+  }
+
+  if (window.supabaseError) {
+    tableBody.innerHTML = `<tr><td colspan="7" class="error-state" style="text-align: center; padding: 30px; color: #ef4444; font-family: 'Outfit', sans-serif;">● Connection issue: Live prospects data unavailable</td></tr>`;
+    updateProspectsScorecards([]);
+    return;
+  }
+
   // 1. Filter dataset
   let filtered = prospectsData.filter(prosp => {
     // Role based filtering
@@ -148061,7 +135457,8 @@ function renderProspectsList() {
       if (prosp.rep !== (window.currentUsername || 'Tom Collins')) return false;
     } else if (window.currentRole === 'manager') {
       const managerName = window.currentUsername || 'Marcus Dupond';
-      const allEmployees = typeof employeesData !== 'undefined' ? employeesData : [];
+      const liveEmps = getLiveEmployeesList();
+      const allEmployees = (liveEmps && liveEmps.length > 0) ? liveEmps : (typeof employeesData !== 'undefined' ? employeesData : []);
       const directReps = allEmployees.filter(e => e.manager === managerName && e.roleType === 'reps').map(e => e.name);
       
       if (window.managerProspectViewMode === 'mine') {
@@ -148444,6 +135841,11 @@ function renderProspectsList() {
 
   updateProspectsScorecards(filtered);
 
+  if (filtered.length === 0) {
+    tableBody.innerHTML = `<tr><td colspan="7" class="empty-state" style="text-align: center; padding: 30px; color: #94a3b8; font-family: 'Outfit', sans-serif;">No prospects found.</td></tr>`;
+    return;
+  }
+
 
 
 
@@ -148794,23 +136196,10 @@ function renderProspectsList() {
 
 
 
-    const dotColor = inactivityStatus === 'red' ? 'dot-red' : (inactivityStatus === 'orange' ? 'dot-orange' : 'dot-green');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const statusTextClass = inactivityStatus === 'red' ? 'red-text' : (inactivityStatus === 'orange' ? 'orange-text' : 'green-text');
+    // TEMPORARY FRONTEND HANDLING RULE: If inactiveDays is 999, display "No activity yet" instead of "999 days ago".
+    const daysText = prosp.inactiveDays === 999 ? 'No activity yet' : `${prosp.inactiveDays} days ago`;
+    const dotColor = prosp.inactiveDays === 999 ? 'dot-gray' : (inactivityStatus === 'red' ? 'dot-red' : (inactivityStatus === 'orange' ? 'dot-orange' : 'dot-green'));
+    const statusTextClass = prosp.inactiveDays === 999 ? 'gray-text' : (inactivityStatus === 'red' ? 'red-text' : (inactivityStatus === 'orange' ? 'orange-text' : 'green-text'));
 
 
 
@@ -149116,7 +136505,7 @@ function renderProspectsList() {
 
 
 
-            <span class="status-days ${statusTextClass}">${prosp.inactiveDays} days ago</span>
+            <span class="status-days ${statusTextClass}">${daysText}</span>
 
 
 
@@ -149485,6 +136874,32 @@ function updateProspectsScorecards(dataset) {
 
 
   const giftsVal = document.getElementById('prosp-card-gifts-val');
+
+  const isFiltered = (dataset.length !== (typeof prospectsData !== 'undefined' ? prospectsData.length : 0));
+  if (!isFiltered) {
+    if (window.supabaseLoading) {
+      if (totalVal) totalVal.textContent = '...';
+      if (healthVal) { healthVal.textContent = '...'; healthVal.className = 'kpi-value'; }
+      if (neglectedVal) neglectedVal.textContent = '...';
+      if (giftsVal) giftsVal.textContent = '...';
+      return;
+    } else if (window.supabaseError || !window.supabaseKPIs) {
+      if (totalVal) totalVal.textContent = '—';
+      if (healthVal) { healthVal.textContent = '—'; healthVal.className = 'kpi-value'; }
+      if (neglectedVal) neglectedVal.textContent = '—';
+      if (giftsVal) giftsVal.textContent = '—';
+      return;
+    } else if (window.supabaseKPIs) {
+      if (totalVal) totalVal.textContent = window.supabaseKPIs.prospects;
+      if (healthVal) {
+        healthVal.textContent = `${window.supabaseKPIs.avg_health}%`;
+        healthVal.className = `kpi-value ${window.supabaseKPIs.avg_health >= 90 ? 'text-green' : (window.supabaseKPIs.avg_health >= 75 ? 'text-orange' : 'text-red')}`;
+      }
+      if (neglectedVal) neglectedVal.textContent = window.supabaseKPIs.neglected_count;
+      if (giftsVal) giftsVal.textContent = window.supabaseKPIs.deliveredCount;
+      return;
+    }
+  }
 
 
 
@@ -150797,5891 +138212,304 @@ function initProspectsDirectory() {
 
 
 function initProspectIntake() {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const btnAdd = document.getElementById('btn-add-prospect');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const modal = document.getElementById('prospect-intake-modal');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const btnClose = document.getElementById('btn-prospect-modal-close');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const btnCancel = document.getElementById('btn-prospect-cancel');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const form = document.getElementById('prospect-intake-form');
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const btnAddContact = document.getElementById('btn-add-prospect-contact');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const contactsContainer = document.getElementById('additional-prospect-contacts-container');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const btnAddDate = document.getElementById('btn-add-prospect-date');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const datesContainer = document.getElementById('prospect-dates-container');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   if (!btnAdd || !modal) return;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   // Open Modal
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   btnAdd.addEventListener('click', (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     e.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     e.stopPropagation();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Bulletproof viewport centering: force modal element directly onto document.documentElement to bypass relative grids, transforms, and body zoom scaling!
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if (modal.parentElement !== document.documentElement) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       document.documentElement.appendChild(modal);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     modal.classList.add('show');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Helper to re-index additional contacts titles
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   const reindexContacts = () => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     const blocks = contactsContainer.querySelectorAll('.dynamic-block-item');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     blocks.forEach((block, idx) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const title = block.querySelector('.dynamic-block-title');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       if (title) title.textContent = `Additional Contact #${idx + 1}`;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Helper to re-index important dates titles
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   const reindexDates = () => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     const blocks = datesContainer.querySelectorAll('.dynamic-block-item');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     blocks.forEach((block, idx) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const title = block.querySelector('.dynamic-block-title');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       if (title) title.textContent = `Important Date #${idx + 1}`;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Add Dynamic Contact Block
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   if (btnAddContact && contactsContainer) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     btnAddContact.addEventListener('click', (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       e.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const newBlock = document.createElement('div');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       newBlock.className = 'dynamic-block-item';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       newBlock.setAttribute('data-type', 'contact');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       newBlock.innerHTML = `
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         <div class="dynamic-block-header">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <span class="dynamic-block-title">Additional Contact</span>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <button type="button" class="btn-remove-dynamic-item btn-remove-contact" title="Remove Contact">Remove</button>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         <div class="hr-form-grid">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="hr-form-group col-span-2">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <label class="hr-form-label">Contact Name <span style="color:#ef4444;">*</span></label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <input type="text" class="hr-form-input contact-name-input" placeholder="e.g. Jane Smith" required>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="hr-form-group">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <label class="hr-form-label">Job Title / Role</label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <input type="text" class="hr-form-input contact-title-input" placeholder="e.g. CFO / Operations Lead">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="hr-form-group col-span-2">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <label class="hr-form-label">Contact Email <span style="color:#ef4444;">*</span></label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <input type="email" class="hr-form-input contact-email-input" placeholder="e.g. jane@acme.com" required>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="hr-form-group">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <label class="hr-form-label">Contact Direct Phone <span style="color:#ef4444;">*</span></label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             <input type="tel" class="hr-form-input contact-phone-input" placeholder="e.g. (555) 019-9988" required>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       `;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      // Bind Remove Event
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const removeBtn = newBlock.querySelector('.btn-remove-contact');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       removeBtn.addEventListener('click', (ev) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         ev.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         newBlock.remove();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         reindexContacts();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       contactsContainer.appendChild(newBlock);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       reindexContacts();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Add Dynamic Important Date Block
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   if (btnAddDate && datesContainer) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     btnAddDate.addEventListener('click', (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       e.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const newBlock = document.createElement('div');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       newBlock.className = 'dynamic-block-item';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       newBlock.setAttribute('data-type', 'date');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       newBlock.innerHTML = `
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         <div class="dynamic-block-header">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <span class="dynamic-block-title">Important Date</span>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <button type="button" class="btn-remove-dynamic-item btn-remove-date" title="Remove Date">Remove</button>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         <div class="hr-form-grid">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="hr-form-group col-span-2">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <label class="hr-form-label">Date Description / Label <span style="color:#ef4444;">*</span></label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <input type="text" class="hr-form-input date-label-input" placeholder="e.g. CEO's Birthday, Founding Anniversary" required>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+            <label class="hr-form-label">Event Type / Description <span style="color:#ef4444;">*</span></label>
+            <select class="hr-form-input date-type-input" required>
+              <option value="corporate-anniversary">Corporate Anniversary</option>
+              <option value="exec-birthday">Executive Birthday</option>
+              <option value="contract-renewal">Contract Renewal</option>
+              <option value="custom">Custom Milestone</option>
+            </select>
           </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="hr-form-group">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            <label class="hr-form-label">Date <span style="color:#ef4444;">*</span></label>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+            <label class="hr-form-label">Milestone Date <span style="color:#ef4444;">*</span></label>
             <input type="date" class="hr-form-input date-value-input" required>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       `;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      // Bind Remove Event
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       const removeBtn = newBlock.querySelector('.btn-remove-date');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       removeBtn.addEventListener('click', (ev) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         ev.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         newBlock.remove();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         reindexDates();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       datesContainer.appendChild(newBlock);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       reindexDates();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Close Modal
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   const closeModal = () => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     modal.classList.remove('show');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     form.reset();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Clear dynamic blocks
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if (contactsContainer) contactsContainer.innerHTML = '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if (datesContainer) datesContainer.innerHTML = '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Clear validation error highlights
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const inputs = form.querySelectorAll('.hr-form-input, .hr-form-select, .hr-form-textarea');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    inputs.forEach(inp => inp.classList.remove('validation-error'));
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   };
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   if (btnClose) btnClose.addEventListener('click', closeModal);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   if (btnCancel) btnCancel.addEventListener('click', closeModal);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Close modal when clicking on overlay background (Disabled to prevent accidental closing)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // modal.addEventListener('click', (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  //   if (e.target === modal) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  //     closeModal();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  //   }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Form Submission
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  form.addEventListener('submit', (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    e.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Retrieve input values
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const companyName = document.getElementById('prospect-company-name').value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const sector = document.getElementById('prospect-sector').value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const companyEmail = document.getElementById('prospect-company-email').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const companyPhone = document.getElementById('prospect-company-phone').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const streetAddress = document.getElementById('prospect-street-address').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const city = document.getElementById('prospect-city').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const province = document.getElementById('prospect-province').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const postalCode = document.getElementById('prospect-postal-code').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const contactName = document.getElementById('prospect-contact-name').value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const contactTitle = document.getElementById('prospect-contact-title').value.trim() || "N/A";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const contactEmail = document.getElementById('prospect-contact-email').value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const contactPhone = document.getElementById('prospect-contact-phone').value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const assignedRep = document.getElementById('prospect-assigned-rep').value;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const stage = document.getElementById('prospect-stage').value;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const threshold = document.getElementById('prospect-threshold').value;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const prospectValue = document.getElementById('prospect-value').value;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Validate standard required inputs
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    let hasError = false;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const requiredInputs = [
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { id: 'prospect-company-name', val: companyName },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { id: 'prospect-sector', val: sector },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { id: 'prospect-contact-name', val: contactName },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { id: 'prospect-contact-email', val: contactEmail },
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      { id: 'prospect-contact-phone', val: contactPhone }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    ];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    requiredInputs.forEach(item => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const el = document.getElementById(item.id);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (!item.val) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (el) el.classList.add('validation-error');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        hasError = true;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      } else {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (el) el.classList.remove('validation-error');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  if (form) {
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const companyName = document.getElementById('prospect-company-name').value.trim();
+      const sector = document.getElementById('prospect-sector').value.trim();
+      const companyEmail = document.getElementById('prospect-company-email').value.trim() || "N/A";
+      const companyPhone = document.getElementById('prospect-company-phone').value.trim() || "N/A";
+      const streetAddress = document.getElementById('prospect-street-address').value.trim() || "N/A";
+      const city = document.getElementById('prospect-city').value.trim() || "N/A";
+      const province = document.getElementById('prospect-province').value.trim() || "N/A";
+      const postalCode = document.getElementById('prospect-postal-code').value.trim() || "N/A";
+
+      const contactName = document.getElementById('prospect-contact-name').value.trim();
+      const contactTitle = document.getElementById('prospect-contact-title').value.trim() || "N/A";
+      const contactEmail = document.getElementById('prospect-contact-email').value.trim();
+      const contactPhone = document.getElementById('prospect-contact-phone').value.trim();
+
+      const assignedRep = document.getElementById('prospect-assigned-rep').value;
+      const stage = document.getElementById('prospect-stage').value;
+      const threshold = document.getElementById('prospect-threshold').value;
+      const prospectValue = document.getElementById('prospect-value').value;
+
+      let hasError = false;
+      const requiredInputs = [
+        { id: 'prospect-company-name', val: companyName },
+        { id: 'prospect-sector', val: sector },
+        { id: 'prospect-contact-name', val: contactName },
+        { id: 'prospect-contact-email', val: contactEmail },
+        { id: 'prospect-contact-phone', val: contactPhone }
+      ];
+
+      requiredInputs.forEach(item => {
+        const el = document.getElementById(item.id);
+        if (el) {
+          if (!item.val) {
+            el.classList.add('validation-error');
+            hasError = true;
+          } else {
+            el.classList.remove('validation-error');
+          }
+        }
+      });
+
+      if (hasError) {
+        showDashboardToast("Please fill in all required fields.", "⚠️");
+        return;
       }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Validate and compile dynamic secondary contacts
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const additionalContacts = [];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (contactsContainer) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      // Collect additional contacts
+      const additionalContacts = [];
       const contactBlocks = contactsContainer.querySelectorAll('.dynamic-block-item');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       contactBlocks.forEach(block => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const nameEl = block.querySelector('.contact-name-input');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const titleEl = block.querySelector('.contact-title-input');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const emailEl = block.querySelector('.contact-email-input');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const phoneEl = block.querySelector('.contact-phone-input');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const nameVal = nameEl.value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const titleVal = titleEl ? titleEl.value.trim() : '';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const emailVal = emailEl.value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const phoneVal = phoneEl.value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Validate
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (!nameVal) { nameEl.classList.add('validation-error'); hasError = true; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else { nameEl.classList.remove('validation-error'); }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (!emailVal) { emailEl.classList.add('validation-error'); hasError = true; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else { emailEl.classList.remove('validation-error'); }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (!phoneVal) { phoneEl.classList.add('validation-error'); hasError = true; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else { phoneEl.classList.remove('validation-error'); }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        additionalContacts.push({
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          name: nameVal,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          title: titleVal || 'N/A',
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          email: emailVal,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          phone: phoneVal
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        const nameVal = block.querySelector('.contact-name-input').value.trim();
+        const roleVal = block.querySelector('.contact-title-input').value.trim();
+        const emailVal = block.querySelector('.contact-email-input').value.trim();
+        const phoneVal = block.querySelector('.contact-phone-input').value.trim();
+        if (nameVal && emailVal && phoneVal) {
+          additionalContacts.push({ name: nameVal, title: roleVal, email: emailVal, phone: phoneVal });
+        }
       });
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Validate and compile dynamic custom important dates
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const importantDates = [];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (datesContainer) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      // Collect important dates
+      const importantDates = [];
       const dateBlocks = datesContainer.querySelectorAll('.dynamic-block-item');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       dateBlocks.forEach(block => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const labelEl = block.querySelector('.date-label-input');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const dateValEl = block.querySelector('.date-value-input');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const labelVal = labelEl.value.trim();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        const dateVal = dateValEl.value;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // Validate
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (!labelVal) { labelEl.classList.add('validation-error'); hasError = true; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else { labelEl.classList.remove('validation-error'); }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        if (!dateVal) { dateValEl.classList.add('validation-error'); hasError = true; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        else { dateValEl.classList.remove('validation-error'); }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        importantDates.push({
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          label: labelVal,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-          date: dateVal
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        const typeVal = block.querySelector('.date-type-input').value;
+        const valVal = block.querySelector('.date-value-input').value;
+        if (valVal) {
+          importantDates.push({ type: typeVal, date: valVal });
+        }
       });
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (hasError) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      showDashboardToast("Please fill in all required corporate contact and milestone date fields highlighted in red.", "⚠️");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      return;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Compute initials from Company Name
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    let initials = "PR";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (companyName) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      const parts = companyName.split(' ');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      if (parts.length >= 2) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        initials = (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      } else if (parts.length === 1) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        initials = parts[0].substring(0, 2).toUpperCase();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      const submitBtn = document.getElementById('btn-prospect-submit');
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Registering...';
       }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Deal value translation
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    let dealValue = 15000;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (prospectValue.includes('50,000+')) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      dealValue = 75000;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    } else if (prospectValue.includes('25,000')) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      dealValue = 35000;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    } else if (prospectValue.includes('10,000')) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      dealValue = 18000;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    } else {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      dealValue = 7500;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Construct new prospect dataset item
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const newProspect = {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      name: companyName,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      initials: initials,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      sector: sector,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      rep: assignedRep,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      prospects: 1,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      customers: 0,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      gifts: 0,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      inactiveDays: 0, // Registered today
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      health: 100, // Perfect score
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      colorClass: "bg-indigo",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      streetAddress: streetAddress,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      contact: contactName,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      city: city,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      province: province,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      postal: postalCode,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      prospect: new Date().toISOString().split('T')[0],
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      customer: "N/A",
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      phone: contactPhone,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      email: contactEmail,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      additionalContacts: additionalContacts,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      importantDates: importantDates,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      aiRecommend: `New sales lead in ${stage} stage. Box budget / Est Value: ${prospectValue}.`,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      category: stage.toLowerCase().includes('discovery') ? 'cold' : (stage.toLowerCase().includes('proposal') ? 'warm' : 'hot'),
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-      dealValue: dealValue
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Push into global array
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    prospectsData.push(newProspect);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    updateTabPillBadges();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Success Toast
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    showDashboardToast(`🎉 B2B Prospect Registered! ${companyName} added successfully.`, '✓');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Close Modal
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    closeModal();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Instantly Re-render Prospects Table and Scorecard KPIs
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    renderProspectsList();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// ============================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// SYSTEM BOOT (CALLED AFTER DOM LOAD TO PREVENT WORDPRESS TDZ REFERENCE ERRORS)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// ============================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-document.addEventListener('DOMContentLoaded', () => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  if (canvas && enterButton) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    initHero1SnapToStats();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    initHero4SnapToHero5();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    preloadAssets();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  } else if (document.getElementById('about-hero-section')) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Standalone About Us page
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const mainNav = document.getElementById('main-nav');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const mainContent = document.getElementById('main-content');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (mainNav) mainNav.classList.add('nav-visible');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (mainContent) mainContent.classList.add('content-visible');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    initAboutPage();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  } else if (document.getElementById('sweet-hero-section')) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Standalone Sweet Boxes page
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const mainNav = document.getElementById('main-nav');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const mainContent = document.getElementById('main-content');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (mainNav) mainNav.classList.add('nav-visible');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (mainContent) mainContent.classList.add('content-visible');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    initSweetPage();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  } else if (document.getElementById('pack-hero-section')) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Standalone Pack Boxes page
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const mainNav = document.getElementById('main-nav');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const mainContent = document.getElementById('main-content');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (mainNav) mainNav.classList.add('nav-visible');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    if (mainContent) mainContent.classList.add('content-visible');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    initPacksPage();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  } else if (document.getElementById('dashboard-shell')) {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Standalone RMOS Dashboard Page
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    initDashboardPage();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+      (async () => {
+        try {
+          // 1. Resolve rep ID from name
+          const cleanRepName = assignedRep.replace(/\s*\(.*\)/, '').trim();
+          const { data: repProf, error: repProfErr } = await supabase
+            .from('profiles')
+            .select('id')
+            .ilike('name', `%${cleanRepName}%`)
+            .limit(1);
+          if (repProfErr) {
+            console.error("[SUPABASE PROSPECT INTAKE] Rep resolve failed:", repProfErr);
+          }
+          const repId = repProf && repProf[0] ? repProf[0].id : null;
+
+          // 2. Insert organization
+          const { data: newOrg, error: orgErr } = await supabase
+            .from('organizations')
+            .insert({
+              name: companyName,
+              sector: sector,
+              category: 'prospect',
+              street_address: streetAddress,
+              city: city,
+              province: province,
+              postal_code: postalCode,
+              phone: companyPhone,
+              email: companyEmail,
+              workspace_id: window.activeWorkspaceId || 'd9b0a1a0-0000-0000-0000-000000000001'
+            })
+            .select()
+            .single();
+
+          if (orgErr) {
+            console.error("[SUPABASE PROSPECT INTAKE] Organization insert failed:", orgErr);
+            showDashboardToast(`Database Error: ${orgErr.message || orgErr.details || 'Check permission details.'}`, '❌');
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.textContent = 'Add New Prospect';
+            }
+            return;
+          }
+
+          // 3. Insert contact
+          const { data: newCont, error: contErr } = await supabase
+            .from('contacts')
+            .insert({
+              org_id: newOrg.id,
+              name: contactName,
+              email: contactEmail,
+              phone: contactPhone,
+              assigned_rep_id: repId,
+              relationship_health: 100,
+              ai_recommendation: `New prospect registered under stage: ${stage}. Gifting budget threshold: ${threshold}.`,
+              workspace_id: window.activeWorkspaceId || 'd9b0a1a0-0000-0000-0000-000000000001'
+            })
+            .select()
+            .single();
+
+          if (contErr) {
+            console.error("[SUPABASE PROSPECT INTAKE] Contact insert failed:", contErr);
+            showDashboardToast(`Database Error: ${contErr.message || contErr.details || 'Check permission details.'}`, '❌');
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.textContent = 'Add New Prospect';
+            }
+            return;
+          }
+
+          console.log("[SUPABASE PROSPECT INTAKE] Successfully registered prospect contact in database.");
+          showDashboardToast("🎉 B2B Prospect Registered! " + companyName + " added successfully.", "✓");
+
+          // Close modal and reset form
+          closeModal();
+
+          // 4. Reload data
+          await fetchDashboardData();
+
+        } catch (err) {
+          console.error("[SUPABASE PROSPECT INTAKE] Exception during registration:", err);
+          showDashboardToast("Error: " + (err.message || err), "❌");
+        } finally {
+          if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Add New Prospect';
+          }
+        }
+      })();
+    });
   }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-});
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// ============================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
+}
 
 
 // 20. WHITEBOX ANALYTICS COMMAND CENTER — JARVIS HUD INTERACTION LOGIC
@@ -159389,6 +141217,7 @@ const liveActivityFeed = [
 
 
 ];
+
 
 
 
@@ -168371,501 +150200,76 @@ function renderGiftingTrendChart(trendData, labels) {
 
 
 function renderEmployeeLeaderboard() {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const tbody = document.getElementById('leaderboard-analytics-tbody');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   if (!tbody) return;
 
+  if (window.supabaseLoading) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 20px; color: #a855f7; font-family: 'Outfit'; font-weight: 500; font-size: 13px; background: rgba(168, 85, 247, 0.02);">● Loading live standings...</td></tr>`;
+    return;
+  }
+  if (window.supabaseError || !window.supabaseLeaderboardLive) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 20px; color: #ef4444; font-family: 'Outfit'; font-weight: 500; font-size: 13px; background: rgba(239, 68, 68, 0.02);">● Live leaderboard unavailable</td></tr>`;
+    return;
+  }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+  const liveEmployees = getLiveEmployeesList();
+  const list = liveEmployees.filter(e => e.roleType === 'reps' || e.roleType === 'managers' || e.roleType === 'executives');
+  list.sort((a, b) => b.health - a.health);
   
+  const dataset = list.map((e, idx) => {
+    let rank = `${idx + 1}`;
+    if (idx === 0) rank = '🥇';
+    else if (idx === 1) rank = '🥈';
+    else if (idx === 2) rank = '🥉';
 
+    const colorMap = {
+      'bg-blue': '#3b82f6',
+      'bg-indigo': '#6366f1',
+      'bg-purple': '#8b5cf6',
+      'bg-emerald': '#10b981',
+      'bg-red': '#ef4444',
+      'bg-pink': '#ec4899',
+      'bg-orange': '#f97316'
+    };
+    const hexColor = colorMap[e.colorClass] || '#8b5cf6';
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-  const dataset = employeesLeaderboardDataSets[currentAnalyticsRange] || employeesLeaderboardDataSets['live'];
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    return {
+      rank,
+      name: e.name,
+      initials: e.initials,
+      composite: e.health,
+      touchpoints: e.touchpoints,
+      prospects: e.prospects,
+      clients: e.customers,
+      health: e.health,
+      color: hexColor
+    };
+  });
   
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   tbody.innerHTML = dataset.map(rep => `
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     <tr style="cursor: pointer;">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       <td><span class="leaderboard-rank-icon">${rep.rank}</span></td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       <td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         <div class="leaderboard-name-cell">
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <div class="leaderboard-avatar-mini" style="background: ${rep.color};">${rep.initials}</div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
           <span>${rep.name}</span>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         </div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       </td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       <td style="text-align: right;"><span class="leaderboard-composite-badge">${rep.composite}</span></td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       <td style="text-align: right; font-weight:500;">${rep.touchpoints}</td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       <td style="text-align: right; font-weight:500;">${rep.prospects}</td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       <td style="text-align: right; font-weight:500;">${rep.clients}</td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       <td style="text-align: right; color:#10b981; font-weight:600;">${rep.health}%</td>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     </tr>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   `).join('');
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Bind click handlers to newly rendered leaderboard rows
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   const rows = tbody.querySelectorAll('tr');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   rows.forEach(row => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     row.onclick = (e) => {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       e.preventDefault();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
       showAnalyticsPreviewModal('rep-leaderboard');
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
 
 
@@ -196526,7 +177930,24 @@ function showAnalyticsPreviewModal(metric, selectedMonth, selectedDayIndex) {
 
 
 
-      const activeLboard = (employeesLeaderboardDataSets[currentAnalyticsRange] || employeesLeaderboardDataSets['live']).map(r => ({...r}));
+      const liveEmps = getLiveEmployeesList();
+      let activeLboard;
+      if (liveEmps && liveEmps.length > 0) {
+        activeLboard = liveEmps.map(emp => {
+          const comp = emp.composite || Math.round((emp.health || 0) * 0.7 + (emp.touchpoints || 0) * 0.3);
+          return {
+            name: emp.name,
+            composite: comp,
+            touchpoints: emp.touchpoints || 0,
+            prospects: emp.prospects || 0,
+            clients: emp.customers || 0,
+            health: emp.health || 0
+          };
+        });
+        activeLboard.sort((a, b) => b.composite - a.composite);
+      } else {
+        activeLboard = (employeesLeaderboardDataSets[currentAnalyticsRange] || employeesLeaderboardDataSets['live']).map(r => ({...r}));
+      }
 
 
 
@@ -197503,6 +178924,9 @@ function showAnalyticsPreviewModal(metric, selectedMonth, selectedDayIndex) {
 
 
       ];
+      fullLboardList.forEach((rep, idx) => {
+        rep.rank = (idx + 1).toString();
+      });
 
 
 
@@ -203093,7 +184517,9 @@ function renderExecutiveCalendar(year, month) {
       });
     } else if (isManager) {
       const mgrName = username;
-      const repRecords = (typeof employeesData !== 'undefined') ? employeesData.filter(e => e.manager && e.manager.trim().toLowerCase() === mgrName.trim().toLowerCase() && (e.roleType === 'reps' || e.roleType === 'employee')) : [];
+      const liveEmps = getLiveEmployeesList();
+      const allEmployees = (liveEmps && liveEmps.length > 0) ? liveEmps : ((typeof employeesData !== 'undefined') ? employeesData : []);
+      const repRecords = allEmployees.filter(e => e.manager && e.manager.trim().toLowerCase() === mgrName.trim().toLowerCase() && (e.roleType === 'reps' || e.roleType === 'employee'));
       const repsList = repRecords.map(r => r.name);
       dayEvents = dayEvents.filter(ev => ev.target === mgrName || repsList.includes(ev.target) || ev.target === 'Tom Collins');
       dayNudges = dayNudges.filter(nd => {
@@ -204044,7 +185470,9 @@ function renderOwnerCalendarDayBreakdown(selectedDate) {
     });
   } else if (isManager) {
     const mgrName = username;
-    const repRecords = (typeof employeesData !== 'undefined') ? employeesData.filter(e => e.manager && e.manager.trim().toLowerCase() === mgrName.trim().toLowerCase() && (e.roleType === 'reps' || e.roleType === 'employee')) : [];
+    const liveEmps = getLiveEmployeesList();
+    const allEmployees = (liveEmps && liveEmps.length > 0) ? liveEmps : ((typeof employeesData !== 'undefined') ? employeesData : []);
+    const repRecords = allEmployees.filter(e => e.manager && e.manager.trim().toLowerCase() === mgrName.trim().toLowerCase() && (e.roleType === 'reps' || e.roleType === 'employee'));
     const repsList = repRecords.map(r => r.name);
     
     events = events.filter(ev => ev.target === mgrName || repsList.includes(ev.target) || ev.target === 'Tom Collins');
@@ -227697,6 +209125,19 @@ const auditNameMapping = {
 
 
 function hydrateRelationshipAuditBanner(name) {
+  const type = window.activeProfileType || 'customer';
+  const db = (type.toLowerCase() === 'prospect') ? prospectsData : customersData;
+  const record = db.find(c => c.name === name);
+  if (record) {
+    window.activeContactId = record.id;
+    window.activeOrgId = record.orgId;
+    window.activeAssignedRepId = record.assignedRepId;
+    console.log(`[ACTIVE CONTACT CONTEXT] Selected contact: name=${name}, id=${window.activeContactId}, orgId=${window.activeOrgId}, assignedRepId=${window.activeAssignedRepId}`);
+  } else {
+    window.activeContactId = null;
+    window.activeOrgId = null;
+    window.activeAssignedRepId = null;
+  }
 
 
 
@@ -232921,6 +214362,9 @@ window.updateConstellationPills = function() {
 
 
           node.addEventListener('click', (e) => {
+      if (typeof window.cancelContactEdit === 'function') {
+        window.cancelContactEdit();
+      }
 
 
 
@@ -233008,7 +214452,9 @@ window.compileTeamConstellationMetrics = function(managerName) {
 
 
 
-  const repRecords = (typeof employeesData !== 'undefined') ? employeesData.filter(e => e.manager && e.manager.trim().toLowerCase() === managerName.trim().toLowerCase() && (e.roleType === 'reps' || e.roleType === 'employee')) : [];
+  const liveEmps = getLiveEmployeesList();
+  const allEmployees = (liveEmps && liveEmps.length > 0) ? liveEmps : ((typeof employeesData !== 'undefined') ? employeesData : []);
+  const repRecords = allEmployees.filter(e => e.manager && e.manager.trim().toLowerCase() === managerName.trim().toLowerCase() && (e.roleType === 'reps' || e.roleType === 'employee'));
 
 
 
@@ -233020,7 +214466,7 @@ window.compileTeamConstellationMetrics = function(managerName) {
 
 
 
-  const mgrRecord = (typeof employeesData !== 'undefined') ? employeesData.find(e => e.name && e.name.trim().toLowerCase() === managerName.trim().toLowerCase()) : null;
+  const mgrRecord = allEmployees.find(e => e.name && e.name.trim().toLowerCase() === managerName.trim().toLowerCase());
 
 
 
@@ -234063,6 +215509,195 @@ window.hydrateConstellationDetail = function(el) {
 document.addEventListener('DOMContentLoaded', () => {
 
 
+
+  // Initialize employee timeline tab state
+  window.employeeTimelineTab = 'activity';
+
+  // Global helper to switch active profiles dynamically
+  window.switchToProfile = function(name, type) {
+    if (!name || !type) return;
+    
+    // Find the registry list element with matching name and click it to change the active profile!
+    let found = false;
+    document.querySelectorAll('[data-name]').forEach(el => {
+      const elType = el.getAttribute('data-type') || '';
+      if (el.getAttribute('data-name').trim() === name.trim() && elType.toLowerCase() === type.toLowerCase()) {
+        el.click();
+        found = true;
+      }
+    });
+    
+    if (!found) {
+      document.querySelectorAll('.registry-row, .list-item, .employee-item').forEach(el => {
+        const elName = (el.getAttribute('data-name') || el.getAttribute('data-contact') || el.textContent.trim()).trim();
+        const elType = el.getAttribute('data-type') || '';
+        if (elName === name && elType.toLowerCase() === type.toLowerCase()) {
+          el.click();
+          found = true;
+        }
+      });
+    }
+
+    if (!found) {
+      // Fallback
+      window.activeProfileName = name;
+      window.activeProfileType = type.toLowerCase();
+      window.refreshActiveDetailPanel();
+    }
+  };
+
+  // Add click handlers for employee timeline tab toggle buttons dynamically when clicking
+  document.addEventListener('click', (e) => {
+    const activityBtn = e.target.closest('#btn-employee-tab-activity') || e.target.closest('#timeline-toggle-activity');
+    const reportBtn = e.target.closest('#btn-employee-tab-report') || e.target.closest('#timeline-toggle-report');
+    const exportBtn = e.target.closest('#btn-employee-tab-export');
+    const printBtn = e.target.closest('#btn-employee-tab-print');
+
+    if (activityBtn) {
+      window.employeeTimelineTab = 'activity';
+      const btns = [
+        document.getElementById('btn-employee-tab-activity'),
+        document.getElementById('timeline-toggle-activity')
+      ];
+      btns.forEach(b => {
+        if (b) {
+          b.classList.add('active');
+          if (b.id === 'timeline-toggle-activity') {
+            b.style.background = 'rgba(59, 130, 246, 0.15)';
+            b.style.color = '#3b82f6';
+          }
+        }
+      });
+      const rBtns = [
+        document.getElementById('btn-employee-tab-report'),
+        document.getElementById('timeline-toggle-report')
+      ];
+      rBtns.forEach(r => {
+        if (r) {
+          r.classList.remove('active');
+          if (r.id === 'timeline-toggle-report') {
+            r.style.background = 'transparent';
+            r.style.color = '#64748b';
+          }
+        }
+      });
+      if (typeof renderTimeline === 'function') {
+        renderTimeline(window.activeProfileName);
+      }
+    } else if (reportBtn) {
+      window.employeeTimelineTab = 'report';
+      const btns = [
+        document.getElementById('btn-employee-tab-report'),
+        document.getElementById('timeline-toggle-report')
+      ];
+      btns.forEach(b => {
+        if (b) {
+          b.classList.add('active');
+          if (b.id === 'timeline-toggle-report') {
+            b.style.background = 'rgba(59, 130, 246, 0.15)';
+            b.style.color = '#3b82f6';
+          }
+        }
+      });
+      const aBtns = [
+        document.getElementById('btn-employee-tab-activity'),
+        document.getElementById('timeline-toggle-activity')
+      ];
+      aBtns.forEach(a => {
+        if (a) {
+          a.classList.remove('active');
+          if (a.id === 'timeline-toggle-activity') {
+            a.style.background = 'transparent';
+            a.style.color = '#64748b';
+          }
+        }
+      });
+      if (typeof renderTimeline === 'function') {
+        renderTimeline(window.activeProfileName);
+      }
+    } else if (exportBtn) {
+      // Premium Export Feature! Show confirmation toast or alert with data
+      const name = window.activeProfileName;
+      const myClients = (typeof customersData !== 'undefined' ? customersData : []).filter(c => c.rep === name);
+      const myProspects = (typeof prospectsData !== 'undefined' ? prospectsData : []).filter(p => p.rep === name);
+      
+      const csvLines = [
+        ['Type', 'Name', 'Rep', 'Health', 'Inactive Days', 'Calls Logged', 'Gifts Dispatched'],
+        ...myClients.map(c => ['Client', c.name, c.rep, c.health, c.inactiveDays || 0, c.calls || 0, c.gifts || 0]),
+        ...myProspects.map(p => ['Prospect', p.name, p.rep, p.health, p.inactiveDays || 0, p.calls || 0, p.gifts || 0])
+      ];
+      
+      const csvContent = "data:text/csv;charset=utf-8," + csvLines.map(e => e.map(val => `"${val}"`).join(",")).join("\n");
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement("a");
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", `${name.replace(/\s+/g, '_')}_Report_Card.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      // Toast notification if helper exists
+      if (typeof showToast === 'function') {
+        showToast('Export Successful', `Exported Report Card for ${name} to CSV.`);
+      } else {
+        alert(`Exported Report Card for ${name} to CSV.`);
+      }
+    } else if (printBtn) {
+      // Print report card! Focus on the detail-timeline-list container and print it!
+      const timelineEl = document.getElementById('detail-timeline-list');
+      if (timelineEl) {
+        const printWindow = window.open('', '_blank');
+        printWindow.document.write(`
+          <html>
+            <head>
+              <title>Employee Performance Report - ${window.activeProfileName}</title>
+              <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700&display=swap" rel="stylesheet">
+              <style>
+                body {
+                  background: #0b0f19;
+                  color: #f8fafc;
+                  font-family: 'Outfit', sans-serif;
+                  padding: 40px;
+                }
+                .report-card-container {
+                  max-width: 800px;
+                  margin: 0 auto;
+                  border: 1px solid rgba(255, 255, 255, 0.1);
+                  border-radius: 16px;
+                  padding: 24px;
+                  background: #111827;
+                }
+                .metric-card {
+                  background: rgba(255, 255, 255, 0.05) !important;
+                  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+                  padding: 16px;
+                  border-radius: 12px;
+                }
+                .report-grid {
+                  display: grid;
+                  grid-template-columns: repeat(2, 1fr);
+                  gap: 16px;
+                }
+                h5 {
+                  font-size: 16px;
+                  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+                  padding-bottom: 8px;
+                  margin-top: 24px;
+                }
+                button { display: none !important; }
+              </style>
+            </head>
+            <body onload="window.print(); window.close();">
+              <h2 style="text-align: center; margin-bottom: 20px;">WhiteBox RMOS Performance Report</h2>
+              <h3 style="text-align: center; color: #3b82f6; margin-bottom: 40px;">Employee: ${window.activeProfileName}</h3>
+              ${timelineEl.innerHTML}
+            </body>
+          </html>
+        `);
+        printWindow.document.close();
+      }
+    }
+  });
 
   // 1. Initialize settings structure
 
@@ -236542,6 +218177,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
   renderSeatsRegistry();
+
+  // Initialize the dashboard page
+  initDashboardPage();
 
 
 

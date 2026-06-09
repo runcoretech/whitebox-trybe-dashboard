@@ -1,6 +1,10 @@
-# WhiteBox Giftworks Private RMOS Dashboard
+# WhiteBox Giftworks Private RMOS Dashboard [DEPRECATED / DEV-ONLY]
 
-This repository contains the private relationship management operating system (RMOS) dashboard for WhiteBox Giftworks. It runs independently on port `5174` during local development.
+> [!WARNING]
+> **This directory is no longer the active runtime folder.**
+> The active runtime folder and single source of truth for the dashboard is now the root `/dashboard` directory.
+> All production assets and portal routes on port `5173` serve from the root `/dashboard` directory.
+> This directory is kept for reference/development archive only.
 
 ---
 

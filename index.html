@@ -7,6 +7,16 @@
 
 
 <head>
+    <script>
+      window.myLogs = [];
+      ['log', 'info', 'warn', 'error'].forEach(type => {
+        const original = console[type];
+        console[type] = function(...args) {
+          window.myLogs.push({ type, text: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ') });
+          original.apply(console, args);
+        };
+      });
+    </script>
 
 
 
@@ -7229,6 +7239,10 @@
 
 
 
+                                <button class="btn-ledger-submit" id="btn-edit-contact" style="display: none; margin-left: 10px; padding: 6px 14px; font-size: 10.5px; font-weight: 700; border: none; border-radius: 20px; background: linear-gradient(135deg, #a855f7 0%, #6366f1 100%); color: #fff; cursor: pointer; box-shadow: 0 4px 10px rgba(168, 85, 247, 0.25); transition: all 0.2s;">✏️ Edit Contact</button>
+
+
+
                             </div>
 
 
@@ -7384,12 +7398,12 @@
                             </div>
 
                             <div class="metadata-item">
-                                <span class="metadata-label">Days in System</span>
+                                <span class="metadata-label">Record Created</span>
                                 <strong id="detail-days-in-system" style="color: #c084fc;">0 Days</strong>
                             </div>
 
                             <div class="metadata-item" id="metadata-item-days-as-customer">
-                                <span class="metadata-label">Days as Customer</span>
+                                <span class="metadata-label">Days Since Customer Record Created</span>
                                 <strong id="detail-days-as-customer" style="color: #34d399;">-</strong>
                             </div>
 
@@ -7401,7 +7415,7 @@
 
 
 
-                                <span class="metadata-label">Prospect</span>
+                                <span class="metadata-label">Date Added (Prospect)</span>
 
 
 
@@ -7417,7 +7431,7 @@
 
 
 
-                                <span class="metadata-label">Customer</span>
+                                <span class="metadata-label">Date Added (Customer)</span>
 
 
 
@@ -8880,17 +8894,24 @@
 
 
 
-                            <h4 class="timeline-panel-title">
-
-
+                            <h4 class="timeline-panel-title" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
 
                                 <span>Relationship Update Timeline</span>
 
+                                <div style="display: flex; align-items: center; gap: 6px;">
+                                    <span class="panel-tag" id="timeline-chronological-tag" style="background: rgba(255,255,255,0.03); border-color: rgba(255,255,255,0.06); color: #64748b;">Chronological</span>
 
+                                    <!-- Toggle for Employees -->
+                                    <div class="timeline-toggle-wrapper" id="timeline-toggle-container" style="display: none; align-items: center; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 2px; gap: 2px;">
+                                      <button class="timeline-toggle-btn active" id="timeline-toggle-report" style="background: rgba(59, 130, 246, 0.15); border: none; color: #3b82f6; font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s;">Report Card</button>
+                                      <button class="timeline-toggle-btn" id="timeline-toggle-activity" style="background: transparent; border: none; color: #64748b; font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s;">Activity Ledger</button>
+                                    </div>
 
-                                <span class="panel-tag" style="background: rgba(255,255,255,0.03); border-color: rgba(255,255,255,0.06); color: #64748b;">Chronological</span>
-
-
+                                    <!-- See Full Report Button -->
+                                    <button id="btn-timeline-full-report" style="background: rgba(99, 102, 241, 0.1); border: 1px solid rgba(99, 102, 241, 0.4); border-radius: 20px; color: #818cf8; font-family: 'Outfit'; font-size: 11px; font-weight: 700; padding: 6px 16px; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 6px; outline: none;" onmouseover="this.style.background='rgba(99, 102, 241, 0.2)'; this.style.boxShadow='0 0 10px rgba(99, 102, 241, 0.3)';" onmouseout="this.style.background='rgba(99, 102, 241, 0.1)'; this.style.boxShadow='none';">
+                                        📈 See Full Report
+                                    </button>
+                                </div>
 
                             </h4>
 
@@ -17215,12 +17236,6 @@
 
 
                             </div>
-
-
-
-                        
-
-
 
                         </div>
 
