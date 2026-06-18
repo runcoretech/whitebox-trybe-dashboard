@@ -33,7 +33,10 @@ select
   c.id as contact_id,
   c.name as contact_name,
   c.workspace_id,
-  coalesce(date_part('day', now() - la.last_activity), 999)::integer as inactive_days,
+  -- Keep double precision (the column's existing type) so CREATE OR REPLACE VIEW
+  -- is allowed — it cannot change an existing column's data type. Invisible to
+  -- the app (JS reads it as a number regardless).
+  coalesce(date_part('day', now() - la.last_activity), 999::double precision) as inactive_days,
   greatest(0, least(100,
     case
       when la.last_activity is null then 0
