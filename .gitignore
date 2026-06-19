@@ -13,3 +13,6 @@ build/
 !.env.example
 *.pem
 *.key
+
+# Local-only diff/scratch artifacts (may contain dev secrets) — never commit
+scratch/

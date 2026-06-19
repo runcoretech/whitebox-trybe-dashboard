@@ -59,23 +59,26 @@ ON CONFLICT (workspace_id, name) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
 -- 3. SEED AUTH USERS & PROFILES (ROLE HIERARCHY PRESERVING)
--- Using dummy Bcrypt hash representing development password 'wb_password_2026!'
+-- Passwords are seeded NULL — NO shared/default credential lives in source.
+-- Provision logins via the in-app reset flow (/forgot-password) or
+-- scripts/rotate-auth-passwords.mjs. (The former shared demo password has been
+-- retired in the 2d auth work.)
 -- ----------------------------------------------------------------------------
 -- 3.1. Insert auth.users
 INSERT INTO auth.users (id, email, encrypted_password, email_confirmed_at, raw_user_meta_data, raw_app_meta_data, is_super_admin, aud, role)
 VALUES
-    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9801', 'owner@whitebox.com', '$2a$10$U.yP0zM2Q7K3t.GgL2qL0.m3F07oU1N0S/4zYgO/q1rG/0Z/Gg3vS', now(), '{"name": "Paul K.", "role": "owner"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
-    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9802', 'g.sterling@whitebox.com', '$2a$10$U.yP0zM2Q7K3t.GgL2qL0.m3F07oU1N0S/4zYgO/q1rG/0Z/Gg3vS', now(), '{"name": "Gregory Sterling", "role": "executive"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
-    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9803', 'executive@whitebox.com', '$2a$10$U.yP0zM2Q7K3t.GgL2qL0.m3F07oU1N0S/4zYgO/q1rG/0Z/Gg3vS', now(), '{"name": "Sarah Lansky", "role": "executive"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
-    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9804', 'e.davis@whitebox.com', '$2a$10$U.yP0zM2Q7K3t.GgL2qL0.m3F07oU1N0S/4zYgO/q1rG/0Z/Gg3vS', now(), '{"name": "Emily Davis", "role": "executive"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
-    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9805', 'manager@whitebox.com', '$2a$10$U.yP0zM2Q7K3t.GgL2qL0.m3F07oU1N0S/4zYgO/q1rG/0Z/Gg3vS', now(), '{"name": "Marcus Dupond", "role": "manager"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
-    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9806', 'j.smith@whitebox.com', '$2a$10$U.yP0zM2Q7K3t.GgL2qL0.m3F07oU1N0S/4zYgO/q1rG/0Z/Gg3vS', now(), '{"name": "Jane Smith", "role": "manager"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
-    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9807', 'rep@whitebox.com', '$2a$10$U.yP0zM2Q7K3t.GgL2qL0.m3F07oU1N0S/4zYgO/q1rG/0Z/Gg3vS', now(), '{"name": "Tom Collins", "role": "rep"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
-    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9808', 'd.schrute@whitebox.com', '$2a$10$U.yP0zM2Q7K3t.GgL2qL0.m3F07oU1N0S/4zYgO/q1rG/0Z/Gg3vS', now(), '{"name": "Dwight Schrute", "role": "rep"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
-    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9809', 'j.doe@whitebox.com', '$2a$10$U.yP0zM2Q7K3t.GgL2qL0.m3F07oU1N0S/4zYgO/q1rG/0Z/Gg3vS', now(), '{"name": "John Doe", "role": "rep"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
-    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9810', 'a.cooper@whitebox.com', '$2a$10$U.yP0zM2Q7K3t.GgL2qL0.m3F07oU1N0S/4zYgO/q1rG/0Z/Gg3vS', now(), '{"name": "Alice Cooper", "role": "rep"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
-    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9811', 'b.martin@whitebox.com', '$2a$10$U.yP0zM2Q7K3t.GgL2qL0.m3F07oU1N0S/4zYgO/q1rG/0Z/Gg3vS', now(), '{"name": "Bob Martin", "role": "rep"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
-    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9812', 'c.brown@whitebox.com', '$2a$10$U.yP0zM2Q7K3t.GgL2qL0.m3F07oU1N0S/4zYgO/q1rG/0Z/Gg3vS', now(), '{"name": "Charlie Brown", "role": "rep"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated')
+    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9801', 'owner@whitebox.com', NULL, now(), '{"name": "Paul K.", "role": "owner"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
+    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9802', 'g.sterling@whitebox.com', NULL, now(), '{"name": "Gregory Sterling", "role": "executive"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
+    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9803', 'executive@whitebox.com', NULL, now(), '{"name": "Sarah Lansky", "role": "executive"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
+    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9804', 'e.davis@whitebox.com', NULL, now(), '{"name": "Emily Davis", "role": "executive"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
+    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9805', 'manager@whitebox.com', NULL, now(), '{"name": "Marcus Dupond", "role": "manager"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
+    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9806', 'j.smith@whitebox.com', NULL, now(), '{"name": "Jane Smith", "role": "manager"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
+    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9807', 'rep@whitebox.com', NULL, now(), '{"name": "Tom Collins", "role": "rep"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
+    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9808', 'd.schrute@whitebox.com', NULL, now(), '{"name": "Dwight Schrute", "role": "rep"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
+    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9809', 'j.doe@whitebox.com', NULL, now(), '{"name": "John Doe", "role": "rep"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
+    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9810', 'a.cooper@whitebox.com', NULL, now(), '{"name": "Alice Cooper", "role": "rep"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
+    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9811', 'b.martin@whitebox.com', NULL, now(), '{"name": "Bob Martin", "role": "rep"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated'),
+    ('8b1933c0-0f0e-4361-b472-3c8cfa2b9812', 'c.brown@whitebox.com', NULL, now(), '{"name": "Charlie Brown", "role": "rep"}'::jsonb, '{"provider": "email"}'::jsonb, false, 'authenticated', 'authenticated')
 ON CONFLICT (id) DO NOTHING;
 
 -- 3.2. Insert public.profiles (Recreating managers hierarchy tree)

@@ -7,10 +7,10 @@
 
 | Email | Password | Role | Display Name | Dashboard Scope |
 |:------|:---------|:-----|:-------------|:----------------|
-| `owner@whitebox.com` | `wb_owner_2026!` | `owner` | Paul K. | Full org-wide read/write + Settings |
-| `executive@whitebox.com` | `wb_exec_2026!` | `hr` | Sarah Lansky | Full org-wide read (Chief People Officer) |
-| `manager@whitebox.com` | `wb_mgr_2026!` | `manager` | Marcus Dupond | Self + direct team reports |
-| `rep@whitebox.com` | `wb_rep_2026!` | `rep` | Tom Collins | Self only |
+| `owner@whitebox.com` | _(per-user; not stored in source)_ | `owner` | Paul K. | Full org-wide read/write + Settings |
+| `executive@whitebox.com` | _(per-user; not stored in source)_ | `hr` | Sarah Lansky | Full org-wide read (Chief People Officer) |
+| `manager@whitebox.com` | _(per-user; not stored in source)_ | `manager` | Marcus Dupond | Self + direct team reports |
+| `rep@whitebox.com` | _(per-user; not stored in source)_ | `rep` | Tom Collins | Self only |
 
 > [!WARNING]
 > Passwords are stored in **plaintext JSON** and fetched client-side via `fetch('/users.json')`. This MUST be replaced with Supabase Auth (email/password provider) during migration. The `users.json` files must be deleted entirely.

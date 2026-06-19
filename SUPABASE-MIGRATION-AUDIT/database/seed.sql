@@ -11,35 +11,38 @@ INSERT INTO public.workspace_settings (workspace_id, decay_warning, decay_critic
 VALUES ('d290f1ee-6c54-4b01-90e6-d701748f0851', 30, 60, 48, 10000.00, 45.00);
 
 -- 3. Seed Auth Users (Will trigger profile creation via public.handle_new_user trigger)
--- Assumes pgcrypto extension is active for password crypt hashing
+-- Passwords are seeded NULL — NO credential lives in source control. Provision
+-- logins via the in-app reset flow (/forgot-password) or
+-- scripts/rotate-auth-passwords.mjs. (Plaintext role passwords were removed here
+-- in the 2d auth work.)
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 INSERT INTO auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at)
 VALUES
   (
     'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'authenticated', 'authenticated', 
-    'owner@whitebox.com', crypt('wb_owner_2026!', gen_salt('bf')), now(), 
+    'owner@whitebox.com', NULL, now(),
     '{"provider":"email","providers":["email"]}', 
     '{"name":"Paul K.","role":"owner","workspace_id":"d290f1ee-6c54-4b01-90e6-d701748f0851"}', 
     now(), now()
   ),
   (
     'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a12', 'authenticated', 'authenticated', 
-    'executive@whitebox.com', crypt('wb_exec_2026!', gen_salt('bf')), now(), 
+    'executive@whitebox.com', NULL, now(),
     '{"provider":"email","providers":["email"]}', 
     '{"name":"Sarah Lansky","role":"hr","workspace_id":"d290f1ee-6c54-4b01-90e6-d701748f0851"}', 
     now(), now()
   ),
   (
     'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a13', 'authenticated', 'authenticated', 
-    'manager@whitebox.com', crypt('wb_mgr_2026!', gen_salt('bf')), now(), 
+    'manager@whitebox.com', NULL, now(),
     '{"provider":"email","providers":["email"]}', 
     '{"name":"Marcus Dupond","role":"manager","workspace_id":"d290f1ee-6c54-4b01-90e6-d701748f0851","manager_id":"a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"}', 
     now(), now()
   ),
   (
     'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a14', 'authenticated', 'authenticated', 
-    'rep@whitebox.com', crypt('wb_rep_2026!', gen_salt('bf')), now(), 
+    'rep@whitebox.com', NULL, now(),
     '{"provider":"email","providers":["email"]}', 
     '{"name":"Tom Collins","role":"rep","workspace_id":"d290f1ee-6c54-4b01-90e6-d701748f0851","manager_id":"a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a13"}', 
     now(), now()
